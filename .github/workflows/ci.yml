@@ -153,12 +153,40 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build release binary
+      # Linux release binaries are built with zigbuild against an old glibc
+      # baseline (2.17 = the manylinux2014/CentOS 7 baseline) instead of
+      # whatever glibc happens to ship on the runner. A binary linked
+      # against a newer glibc refuses to start on any distro with an older
+      # one ("version `GLIBC_2.39' not found"); glibc symbol versioning is
+      # backwards-compatible, so linking against an old baseline lets the
+      # same binary run unmodified on effectively every glibc-based distro
+      # from the last decade+ (this is also why a binary built locally on a
+      # rolling-release distro is the wrong thing to hand out - it picks up
+      # whatever bleeding-edge glibc that machine has).
+      - name: Install Zig (Linux)
+        if: runner.os == 'Linux'
+        uses: mlugg/setup-zig@v2
+
+      - name: Install cargo-zigbuild (Linux)
+        if: runner.os == 'Linux'
+        run: cargo install --locked cargo-zigbuild
+
+      - name: Build release binary (Linux, old-glibc baseline)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          cargo zigbuild --release -p mediakit --target x86_64-unknown-linux-gnu.2.17
+          # The .2.17 glibc-version suffix only steers the linker; cargo
+          # still places output under the plain triple's target dir.
+          echo "MEDIAKIT_BIN=target/x86_64-unknown-linux-gnu/release/mediakit" >> "$GITHUB_ENV"
+
+      - name: Build release binary (Windows)
+        if: runner.os == 'Windows'
         run: cargo build --release -p mediakit
 
       - name: Report binary size (Linux)
         if: runner.os == 'Linux'
-        run: du -h target/release/mediakit
+        run: du -h "$MEDIAKIT_BIN"
 
       - name: Report binary size (Windows)
         if: runner.os == 'Windows'
@@ -170,7 +198,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp target/release/mediakit dist/
+          cp "$MEDIAKIT_BIN" dist/
           cp README.md LICENSE dist/
           tar -C dist -czf "mediakit-${{ matrix.artifact }}.tar.gz" .
 
@@ -198,7 +226,7 @@ jobs:
           chmod +x linuxdeploy
 
           mkdir -p AppDir/usr/bin AppDir/usr/share/icons/hicolor/256x256/apps AppDir/usr/share/applications
-          cp target/release/mediakit AppDir/usr/bin/
+          cp "$MEDIAKIT_BIN" AppDir/usr/bin/
           cp gui/assets/icon.png AppDir/usr/share/icons/hicolor/256x256/apps/mediakit.png
           cp gui/assets/icon.png AppDir/mediakit.png
           cat > AppDir/usr/share/applications/mediakit.desktop << 'EOF'
