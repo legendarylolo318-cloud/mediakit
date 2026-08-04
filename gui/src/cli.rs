@@ -19,7 +19,13 @@ use std::time::Duration;
 #[derive(Parser, Debug)]
 #[command(
     name = "mediakit",
-    about = "MediaKit: batch media conversion (headless mode)"
+    about = "MediaKit: batch media conversion (headless mode)",
+    // Explicit, not relying on clap-derive's automatic version flag: that
+    // didn't register here in practice (`mediakit --version` failed with
+    // "unexpected argument" until this was added - caught by the release
+    // pipeline's post-publish `--version` check). Sourced from this crate's
+    // own Cargo.toml version (workspace-inherited).
+    version
 )]
 pub struct CliArgs {
     /// Input file(s) to convert. Not required when using
