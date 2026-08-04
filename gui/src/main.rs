@@ -30,6 +30,23 @@ fn main() -> eframe::Result<()> {
 
     tracing_subscriber::fmt::init();
 
+    // winit's Wayland backend never fires DroppedFile/HoveredFile events -
+    // support for that is still an open, unmerged upstream PR
+    // (rust-windowing/winit#4269) - so dragging files onto the window
+    // silently does nothing under native Wayland. Winit picks Wayland
+    // whenever WAYLAND_DISPLAY/WAYLAND_SOCKET is set and otherwise falls
+    // back to X11 via DISPLAY (see winit's platform_impl/linux/mod.rs), so
+    // clearing those vars before the event loop is created routes us
+    // through XWayland instead, where drag-and-drop does work. No-op on a
+    // plain X11 session, where the vars are already unset.
+    #[cfg(target_os = "linux")]
+    // SAFETY: single-threaded, and this runs before eframe/winit read the
+    // environment to pick a backend.
+    unsafe {
+        std::env::remove_var("WAYLAND_DISPLAY");
+        std::env::remove_var("WAYLAND_SOCKET");
+    }
+
     let persisted = settings::load();
 
     let native_options = eframe::NativeOptions {
