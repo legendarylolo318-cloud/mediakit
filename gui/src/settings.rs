@@ -50,6 +50,9 @@ pub struct PersistedSettings {
     pub custom_output_folder: Option<PathBuf>,
     pub filename_template: Option<String>,
     pub overwrite_existing: Option<bool>,
+    /// Where the Download tab saves finished downloads. `None` means "not
+    /// chosen yet" - the GUI falls back to the OS Downloads folder.
+    pub download_output_dir: Option<PathBuf>,
     /// User-supplied overrides for the Settings -> Tools page, taking
     /// priority over bundled/detected binaries. `None` means "use whatever
     /// was auto-detected."

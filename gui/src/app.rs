@@ -189,6 +189,7 @@ pub struct MediaKitApp {
     download_rate_limit_kbps: String,
     download_concurrent_fragments: String,
     download_chain: ChainChoice,
+    download_output_dir: PathBuf,
 
     cookie_choice: CookieChoice,
     cookie_browser: String,
@@ -328,6 +329,10 @@ impl MediaKitApp {
             download_rate_limit_kbps: String::new(),
             download_concurrent_fragments: String::new(),
             download_chain: ChainChoice::None,
+            download_output_dir: persisted
+                .download_output_dir
+                .clone()
+                .unwrap_or_else(default_download_dir),
 
             cookie_choice: CookieChoice::None,
             cookie_browser: "firefox".to_string(),
@@ -370,6 +375,7 @@ impl MediaKitApp {
             override_ytdlp_path: self.override_ytdlp.clone(),
             ytdlp_auto_update_enabled: self.ytdlp_auto_update_enabled,
             download_responsibility_acknowledged: self.download_responsibility_acknowledged,
+            download_output_dir: Some(self.download_output_dir.clone()),
         }
     }
 
@@ -786,7 +792,11 @@ impl MediaKitApp {
                 .to_string_lossy()
                 .into_owned()
         } else {
-            "%(title)s.%(ext)s".to_string()
+            let _ = std::fs::create_dir_all(&self.download_output_dir);
+            self.download_output_dir
+                .join("%(title)s.%(ext)s")
+                .to_string_lossy()
+                .into_owned()
         };
 
         DownloadOptions {
@@ -897,6 +907,7 @@ impl MediaKitApp {
             return;
         }
 
+        self.download_output_dir_row(ui);
         ui.horizontal(|ui| {
             ui.label("URLs (one per line):");
             if ui.button("Paste from clipboard").clicked() {
@@ -1010,6 +1021,21 @@ impl MediaKitApp {
         for (url, title) in to_queue {
             self.queue_download(url, title);
         }
+    }
+
+    fn download_output_dir_row(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Save to:");
+            ui.label(self.download_output_dir.to_string_lossy());
+            if ui.button("Browse\u{2026}").clicked() {
+                if let Some(dir) = rfd::FileDialog::new()
+                    .set_directory(&self.download_output_dir)
+                    .pick_folder()
+                {
+                    self.download_output_dir = dir;
+                }
+            }
+        });
     }
 
     fn download_options_panel(&mut self, ui: &mut egui::Ui) {
@@ -2641,6 +2667,19 @@ impl MediaKitApp {
             self.add_files(dropped);
         }
     }
+}
+
+/// The OS's Downloads folder, falling back to the home directory and then
+/// the current directory if that's not available (e.g. `XDG_DOWNLOAD_DIR`
+/// unset on a minimal Linux setup).
+fn default_download_dir() -> PathBuf {
+    if let Some(dirs) = directories::UserDirs::new() {
+        if let Some(dir) = dirs.download_dir() {
+            return dir.to_path_buf();
+        }
+        return dirs.home_dir().to_path_buf();
+    }
+    std::env::current_dir().unwrap_or_default()
 }
 
 fn license_section(ui: &mut egui::Ui, title: &str, text: &str) {
