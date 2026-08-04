@@ -6,11 +6,36 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [master]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Tag/version to build and publish a release for (e.g. v0.1.1).
+          Lets the release job be run and debugged on demand without
+          pushing a real tag for every attempt - published as a draft (see
+          the `release` job) so it never shows up as the public "Latest"
+          release or clutters tag history.
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Fails in seconds, with a clear "Cargo.lock is out of date" message,
+  # instead of a confusing failure ~20 minutes into the full test matrix
+  # every other job's `--locked` test/build steps would otherwise produce -
+  # a dependency edit that wasn't followed by a committed `cargo update`
+  # only ever breaks on CI, never locally, without this.
+  lockfile-check:
+    name: Cargo.lock is up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo metadata --locked
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
   # Every push/PR builds and tests both variants on both platforms:
   # `bundled` (default - vendors its own ffmpeg/ffprobe/yt-dlp) and `slim`
   # (`--no-default-features` - the distro-packager build that only ever
@@ -19,6 +44,7 @@ jobs:
   # branches), so both need real coverage, not just a compile check.
   test:
     name: test (${{ matrix.os }}, ${{ matrix.variant }})
+    needs: lockfile-check
     strategy:
       fail-fast: false
       matrix:
@@ -35,6 +61,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.variant }}
+
+      # Only the `bundled` variant's build.rs ever downloads anything (see
+      # core/build.rs) - keyed on vendor.toml's own hash, separately from
+      # Swatinem/rust-cache's Cargo.lock-keyed cache above, so a pinned
+      # version bump invalidates just this and not the whole build cache,
+      # and unrelated dependency bumps don't force a redundant ~100MB
+      # re-download. `core/build.rs` caches under `$CARGO_HOME/mediakit-vendor`
+      # precisely so this path is stable to cache across runs.
+      - name: Cache vendored ffmpeg/yt-dlp downloads
+        if: matrix.variant == 'bundled'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/mediakit-vendor
+          key: vendor-${{ runner.os }}-${{ hashFiles('core/vendor.toml') }}
 
       # Slim builds fall back to PATH for ffmpeg/ffprobe/yt-dlp, so their
       # test/build steps need a real one available. Bundled builds vendor
@@ -93,6 +133,12 @@ jobs:
         with:
           key: smoke-test
 
+      - name: Cache vendored ffmpeg/yt-dlp downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/mediakit-vendor
+          key: vendor-${{ runner.os }}-${{ hashFiles('core/vendor.toml') }}
+
       - name: Build release binary (bundled, default features)
         run: cargo build --release -p mediakit
 
@@ -128,7 +174,7 @@ jobs:
             -v "${{ github.workspace }}/smoke:/work" \
             -w /work \
             ubuntu:24.04 \
-            /app/mediakit input.mp4 --preset discord-10mb -o output.mp4
+            /app/mediakit input.mp4 --preset target-size --size-preset discord-free -o output.mp4
 
       - name: Verify a real output file was produced
         run: |
@@ -139,9 +185,14 @@ jobs:
   release:
     name: release artifacts (${{ matrix.os }})
     needs: [test, smoke-test]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
+    env:
+      # A real tag push already has the tag as `github.ref_name`; a manual
+      # `workflow_dispatch` run has no tag at all yet (that's the point -
+      # `softprops/action-gh-release` below creates one from this name).
+      MEDIAKIT_RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
     strategy:
       fail-fast: false
       matrix:
@@ -157,6 +208,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Cache vendored ffmpeg/yt-dlp downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/mediakit-vendor
+          key: vendor-${{ runner.os }}-${{ hashFiles('core/vendor.toml') }}
 
       # Linux release binaries are built with zigbuild against an old glibc
       # baseline (2.17 = the manylinux2014/CentOS 7 baseline) instead of
@@ -247,10 +304,86 @@ jobs:
           ./linuxdeploy --appimage-extract-and-run --appdir AppDir --output appimage
           mv MediaKit*.AppImage "mediakit-x86_64.AppImage"
 
+      # `shell: bash` explicitly: on the Windows runner this runs under Git
+      # Bash (which ships `sha256sum`), not PowerShell.
+      - name: Generate SHA-256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in mediakit-*.tar.gz mediakit-*.zip mediakit-*.AppImage; do
+            sha256sum "$f" > "$f.sha256"
+          done
+          cat -- *.sha256
+
       - name: Upload release artifacts
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.MEDIAKIT_RELEASE_TAG }}
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          generate_release_notes: true
+          body: |
+            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/${{ env.MEDIAKIT_RELEASE_TAG }}/CHANGELOG.md) for what changed in this release.
           files: |
             mediakit-*.tar.gz
             mediakit-*.zip
             mediakit-*.AppImage
+            mediakit-*.sha256
+
+  # Downloads exactly what a user would get from the Releases page (draft or
+  # not - `gh release download` works either way when authenticated) and
+  # runs it for real, so a broken release fails this workflow instead of
+  # sitting on the Releases page until a user hits it first.
+  verify-release:
+    name: verify published release (${{ matrix.os }})
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: linux-x86_64
+          - os: windows-latest
+            artifact: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MEDIAKIT_RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+    steps:
+      - name: Download the published release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$MEDIAKIT_RELEASE_TAG" \
+            --repo "${{ github.repository }}" \
+            --pattern "mediakit-${{ matrix.artifact }}.*" \
+            --dir dist
+
+      - name: Verify checksum and run --version (Linux)
+        if: runner.os == 'Linux'
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum -c "mediakit-${{ matrix.artifact }}.tar.gz.sha256"
+          tar -xzf "mediakit-${{ matrix.artifact }}.tar.gz"
+          ./mediakit --version
+
+      - name: Verify checksum and run --version (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: dist
+        run: |
+          $expected = ((Get-Content "mediakit-${{ matrix.artifact }}.zip.sha256") -split '\s+')[0]
+          $actual = (Get-FileHash "mediakit-${{ matrix.artifact }}.zip" -Algorithm SHA256).Hash.ToLower()
+          if ($expected -ne $actual) {
+            throw "checksum mismatch for mediakit-${{ matrix.artifact }}.zip: expected $expected, got $actual"
+          }
+          Expand-Archive -Path "mediakit-${{ matrix.artifact }}.zip" -DestinationPath extracted
+          & "extracted\mediakit.exe" --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "mediakit.exe --version exited with code $LASTEXITCODE"
+          }

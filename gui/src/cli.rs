@@ -423,3 +423,97 @@ fn build_settings(
         }
     }
 }
+
+/// Every `--preset <id>` / `--size-preset <id>` pair the README and CI
+/// actually show a user or the smoke test actually invoke must resolve to a
+/// real `CliPreset` variant / `presets.toml` entry - otherwise the "docs"
+/// are lying and the smoke test is testing nothing (this is exactly what
+/// happened when CI called `--preset discord-10mb`, a value that was never
+/// a `CliPreset` variant nor a `presets.toml` id). Scanning the actual files
+/// instead of hardcoding the ids here means a future doc/CI edit that
+/// introduces a typo'd id fails `cargo test`, not just a live smoke test run.
+#[cfg(test)]
+mod doc_and_ci_preset_ids_test {
+    use super::*;
+    use clap::ValueEnum;
+    use std::path::Path;
+
+    /// Pulls out the value immediately following every `--preset`/
+    /// `--size-preset` token on lines that mention `mediakit`, ignoring
+    /// anything after a ` #` shell/markdown comment marker so prose like
+    /// "show available `--size-preset` ids" (no real value follows) isn't
+    /// mistaken for an invocation.
+    fn extract_flag_values<'a>(text: &'a str, flag: &str) -> Vec<&'a str> {
+        let mut found = Vec::new();
+        for line in text.lines() {
+            if !line.contains("mediakit") {
+                continue;
+            }
+            let line = match line.find(" #") {
+                Some(idx) => &line[..idx],
+                None => line,
+            };
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            for (i, tok) in tokens.iter().enumerate() {
+                if *tok == flag {
+                    if let Some(value) = tokens.get(i + 1) {
+                        found.push(*value);
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    fn repo_root() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .canonicalize()
+            .expect("workspace root")
+    }
+
+    #[test]
+    fn readme_and_ci_preset_values_are_real_cli_preset_variants() {
+        let root = repo_root();
+        let valid: Vec<String> = CliPreset::value_variants()
+            .iter()
+            .map(|v| v.to_possible_value().unwrap().get_name().to_string())
+            .collect();
+
+        for path in [
+            root.join("README.md"),
+            root.join(".github/workflows/ci.yml"),
+        ] {
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            for value in extract_flag_values(&text, "--preset") {
+                assert!(
+                    valid.iter().any(|v| v == value),
+                    "{}: `--preset {value}` is not a real CliPreset variant (valid: {valid:?})",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn readme_and_ci_size_preset_values_resolve_in_presets_toml() {
+        let root = repo_root();
+        let config = mediakit_core::size_presets::SizePresetsConfig::defaults();
+
+        for path in [
+            root.join("README.md"),
+            root.join(".github/workflows/ci.yml"),
+        ] {
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            for value in extract_flag_values(&text, "--size-preset") {
+                assert!(
+                    config.find(value).is_some(),
+                    "{}: `--size-preset {value}` does not resolve against presets.toml",
+                    path.display()
+                );
+            }
+        }
+    }
+}
