@@ -383,7 +383,27 @@ jobs:
             throw "checksum mismatch for mediakit-${{ matrix.artifact }}.zip: expected $expected, got $actual"
           }
           Expand-Archive -Path "mediakit-${{ matrix.artifact }}.zip" -DestinationPath extracted
-          & "extracted\mediakit.exe" --version
-          if ($LASTEXITCODE -ne 0) {
-            throw "mediakit.exe --version exited with code $LASTEXITCODE"
+
+          # Not `& exe --version` + `$LASTEXITCODE`: for a windows_subsystem
+          # = "windows" (GUI) binary like this one, PowerShell's exit-code
+          # tracking via the call operator has proven unreliable in practice
+          # here (`$LASTEXITCODE` came back empty even when the process
+          # plainly ran). `Start-Process -Wait -PassThru` with explicit
+          # stdout/stderr redirection is the robust way to invoke a
+          # GUI-subsystem process and actually get its real exit code and
+          # output back.
+          $stdout = "version-stdout.txt"
+          $stderr = "version-stderr.txt"
+          $proc = Start-Process -FilePath "extracted\mediakit.exe" -ArgumentList "--version" `
+            -NoNewWindow -PassThru -Wait `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          Write-Host "--- stdout ---"
+          Get-Content $stdout -ErrorAction SilentlyContinue
+          Write-Host "--- stderr ---"
+          Get-Content $stderr -ErrorAction SilentlyContinue
+          if ($proc.ExitCode -ne 0) {
+            throw "mediakit.exe --version exited with code $($proc.ExitCode)"
+          }
+          if (-not (Select-String -Path $stdout -Pattern "mediakit" -Quiet -ErrorAction SilentlyContinue)) {
+            throw "mediakit.exe --version exited 0 but printed no recognizable version output"
           }

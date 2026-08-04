@@ -29,10 +29,14 @@ pub fn open_containing_folder(path: &Path) {
 
 /// MediaKit is built with `windows_subsystem = "windows"` on Windows release
 /// builds so double-clicking the exe never flashes a console. That also
-/// means a plain `println!` from CLI mode goes nowhere by default - this
-/// attaches to the invoking terminal's console (if any; there won't be one
-/// when launched by double-click) and repoints stdio at it, so
-/// `mediakit --preset ... input.mp4` still prints normally from a shell.
+/// means a plain `println!` from CLI mode goes nowhere by default when
+/// there's genuinely no stdio at all - this attaches to the invoking
+/// terminal's console in that case and repoints stdio at it, so
+/// `mediakit --preset ... input.mp4` still prints normally from a shell. A
+/// caller that already gave this process real stdio - an interactive
+/// console it inherited, or stdout/stderr explicitly redirected to a
+/// file/pipe - is left untouched; see the no-op early return below for why
+/// that distinction matters.
 #[cfg(windows)]
 pub fn ensure_console_attached() {
     use std::ffi::c_void;
@@ -41,8 +45,8 @@ pub fn ensure_console_attached() {
         CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
     use windows_sys::Win32::System::Console::{
-        AttachConsole, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
-        STD_OUTPUT_HANDLE,
+        AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
+        STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
 
     fn wide(s: &str) -> Vec<u16> {
@@ -50,6 +54,22 @@ pub fn ensure_console_attached() {
     }
 
     unsafe {
+        // If stdout is already a valid handle, something already gave us
+        // real stdio - inherited from an interactive console, or a caller
+        // that explicitly redirected it to a file/pipe (`mediakit ... >
+        // log.txt`, or a test harness capturing output). Leave it alone:
+        // attaching and overwriting it unconditionally would silently
+        // reroute output away from that redirect and onto the console
+        // instead, breaking exactly the callers who took the trouble to
+        // redirect it. Only fall back to attaching a console when there's
+        // truly no stdio at all, which is what a GUI-subsystem binary gets
+        // when launched with no handle inheritance (e.g. a shortcut with
+        // arguments in its Target field, double-clicked from Explorer).
+        let existing_stdout = GetStdHandle(STD_OUTPUT_HANDLE);
+        if !existing_stdout.is_null() && existing_stdout != INVALID_HANDLE_VALUE {
+            return;
+        }
+
         // Fails (returns 0) if there's no parent console to attach to, e.g.
         // launched by double-clicking in Explorer - nothing to do then.
         if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
