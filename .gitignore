@@ -7,5 +7,7 @@ Thumbs.db
 # app data written when running locally during development
 /dev-data/
 
-# cached downloads for core's vendored ffmpeg/ffprobe/yt-dlp build.rs
-/core/.vendor-cache/
+# Vendored ffmpeg/ffprobe/yt-dlp downloads used to live in a workspace-local
+# .vendor-cache/; build.rs now caches them under $CARGO_HOME/mediakit-vendor/
+# instead (stable across `cargo clean`, and shared with everything else that
+# already treats CARGO_HOME as build-artifact-ish rather than source).

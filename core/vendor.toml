@@ -4,7 +4,7 @@
 # never a "latest"/rolling URL. The build fails loudly if a download's hash
 # doesn't match.
 #
-# ffmpeg builds are GPL (BtbN win64-gpl / johnvansickle amd64 static), which
+# ffmpeg builds are GPL (BtbN win64-gpl / linux64-gpl autobuilds), which
 # is why they include libx264/libx265. MediaKit's own source stays MIT -
 # see THIRD_PARTY_LICENSES/ and the in-app Licenses dialog for the
 # GPL compliance story (source availability etc.) for the bundled binaries
@@ -14,15 +14,42 @@
 # publisher's own checksums file (BtbN's `checksums.sha256`, yt-dlp's
 # `SHA2-256SUMS`), and update the corresponding entry below. Never copy a
 # hash from anywhere other than the upstream release's own checksum file.
+# The weekly "vendor freshness" CI workflow (.github/workflows/vendor-check.yml)
+# does exactly this automatically and opens a PR - it never auto-merges.
+#
+# `release_tag` and `date_pinned` are record-keeping only (build.rs doesn't
+# read them): they tell a human, at a glance, how old a pin is and which
+# exact upstream release it came from without having to reverse-engineer it
+# from the URL.
+#
+# Both ffmpeg builds come from BtbN's FFmpeg-Builds project, pinned to a
+# *dated* "autobuild-*" tag, not a stable release - those get pruned
+# periodically, and when a pinned tag disappears every build 404s until
+# vendor.toml is updated. (An earlier version of this file pointed Linux at
+# johnvansickle.com's "releases" URL instead - that path is *not* pinned to
+# a specific version despite looking like it; johnvansickle overwrites it in
+# place on every new upstream ffmpeg release, so the checksum here would
+# eventually drift out from under a build that had cached an older download.
+# BtbN's per-tag release assets don't have that problem - each tag's assets
+# never change after being published - which is also why Windows already
+# used them.)
+#
+# If a pinned tag gets pruned before the next scheduled update lands, set
+# MEDIAKIT_FFMPEG_URL (or MEDIAKIT_YTDLP_URL) to a mirror serving the exact
+# same bytes as a stopgap - build.rs still verifies the download against the
+# sha256 below, so this can only ever substitute *where* the file comes
+# from, never *what* it is.
 
 [ffmpeg.linux-x86_64]
-version = "7.0.2"
-url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
-sha256 = "abda8d77ce8309141f83ab8edf0596834087c52467f6badf376a6a2a4c87cf67"
+version = "8.1.2"
+url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-03-14-02/ffmpeg-n8.1.2-34-g9b6c8969e0-linux64-gpl-8.1.tar.xz"
+sha256 = "aa074d7ea3039daafebb9598c56b26f9f142863a274b8e621c2877762d7865c4"
 archive_kind = "tar_xz"
-ffmpeg_path_in_archive = "ffmpeg-7.0.2-amd64-static/ffmpeg"
-ffprobe_path_in_archive = "ffmpeg-7.0.2-amd64-static/ffprobe"
+ffmpeg_path_in_archive = "ffmpeg-n8.1.2-34-g9b6c8969e0-linux64-gpl-8.1/bin/ffmpeg"
+ffprobe_path_in_archive = "ffmpeg-n8.1.2-34-g9b6c8969e0-linux64-gpl-8.1/bin/ffprobe"
 license = "GPL-3.0-or-later"
+release_tag = "autobuild-2026-08-03-14-02"
+date_pinned = "2026-08-04"
 
 [ffmpeg.windows-x86_64]
 version = "8.1.2"
@@ -32,6 +59,8 @@ archive_kind = "zip"
 ffmpeg_path_in_archive = "ffmpeg-n8.1.2-34-g9b6c8969e0-win64-gpl-8.1/bin/ffmpeg.exe"
 ffprobe_path_in_archive = "ffmpeg-n8.1.2-34-g9b6c8969e0-win64-gpl-8.1/bin/ffprobe.exe"
 license = "GPL-3.0-or-later"
+release_tag = "autobuild-2026-08-03-14-02"
+date_pinned = "2026-08-04"
 
 [ytdlp.linux-x86_64]
 version = "2026.07.04"
@@ -39,6 +68,8 @@ url = "https://github.com/yt-dlp/yt-dlp/releases/download/2026.07.04/yt-dlp_linu
 sha256 = "6bbb3d314cde4febe36e5fa1d55462e29c974f63444e707871834f6d8cc210ae"
 archive_kind = "raw"
 license = "Unlicense"
+release_tag = "2026.07.04"
+date_pinned = "2026-08-04"
 
 [ytdlp.windows-x86_64]
 version = "2026.07.04"
@@ -46,3 +77,5 @@ url = "https://github.com/yt-dlp/yt-dlp/releases/download/2026.07.04/yt-dlp.exe"
 sha256 = "52fe3c26dcf71fbdc85b528589020bb0b8e383155cfa81b64dd447bbe35e24b8"
 archive_kind = "raw"
 license = "Unlicense"
+release_tag = "2026.07.04"
+date_pinned = "2026-08-04"

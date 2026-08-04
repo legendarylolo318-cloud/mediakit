@@ -3,11 +3,22 @@
 //! active - `slim` builds skip this entirely and rely on PATH/manual
 //! detection at runtime instead).
 //!
-//! Downloads are cached in `.vendor-cache/` (gitignored) next to this file,
-//! keyed by the pinned URL, so incremental builds never re-fetch. Set
-//! `MEDIAKIT_VENDOR_DIR` to a directory of pre-downloaded, correctly-named
-//! archives to build fully offline (the cache dir also doubles as this: you
-//! can pre-populate `.vendor-cache/` by hand).
+//! Downloads are cached under `$CARGO_HOME/mediakit-vendor/`, keyed by
+//! `<name>-<version>-<sha256 prefix>`, rather than in `OUT_DIR` - `OUT_DIR`
+//! is per profile/target and gets wiped constantly, which is what used to
+//! make a single `cargo test --all-targets` invocation (lib, test binary,
+//! and any other target, each with their own `OUT_DIR`) redownload the same
+//! archive multiple times. Keying on version *and* checksum means a
+//! `vendor.toml` update to a new pinned release never collides with - or
+//! reuses - a stale cache entry from the old one.
+//!
+//! Set `MEDIAKIT_VENDOR_DIR` to a directory of pre-downloaded,
+//! correctly-named archives to build fully offline. Set
+//! `MEDIAKIT_FFMPEG_URL` / `MEDIAKIT_YTDLP_URL` to fetch from a mirror
+//! instead of the pinned upstream URL when a release tag has been pruned -
+//! the downloaded bytes still have to match the pinned SHA-256, so this only
+//! ever substitutes *where* the exact same file comes from, never *what* it
+//! is.
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -15,6 +26,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Deserialize)]
 struct VendorManifest {
@@ -34,11 +46,24 @@ struct VendorEntry {
     ffprobe_path_in_archive: Option<String>,
     #[serde(default)]
     license: Option<String>,
+    // Record-keeping only (see the module doc on `vendor.toml` for why these
+    // matter): not read here, but `#[serde(default)]` so old-shaped entries
+    // during a transition don't fail to parse.
+    #[serde(default)]
+    #[allow(dead_code)]
+    release_tag: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    date_pinned: Option<String>,
 }
 
 fn main() {
     println!("cargo:rerun-if-changed=vendor.toml");
     println!("cargo:rerun-if-env-changed=MEDIAKIT_VENDOR_DIR");
+    println!("cargo:rerun-if-env-changed=MEDIAKIT_FFMPEG_URL");
+    println!("cargo:rerun-if-env-changed=MEDIAKIT_YTDLP_URL");
+    println!("cargo:rerun-if-env-changed=MEDIAKIT_VENDOR_VERBOSE");
+    println!("cargo:rerun-if-env-changed=CARGO_HOME");
 
     let bundled = std::env::var("CARGO_FEATURE_BUNDLED").is_ok();
     if !bundled {
@@ -67,8 +92,9 @@ fn main() {
     let manifest_dir =
         PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"));
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
-    let cache_dir = manifest_dir.join(".vendor-cache");
-    fs::create_dir_all(&cache_dir).expect("create .vendor-cache");
+    let cache_root = vendor_cache_root();
+    fs::create_dir_all(&cache_root)
+        .unwrap_or_else(|e| panic!("create vendor cache dir {}: {e}", cache_root.display()));
 
     let vendor_toml_path = manifest_dir.join("vendor.toml");
     let vendor_toml_text = fs::read_to_string(&vendor_toml_path).expect("read core/vendor.toml");
@@ -83,8 +109,12 @@ fn main() {
         .get(platform_key)
         .unwrap_or_else(|| panic!("vendor.toml has no [ytdlp.{platform_key}] entry"));
 
-    let ffmpeg_archive = fetch_and_verify(ffmpeg_entry, &cache_dir);
-    let ytdlp_raw = fetch_and_verify(ytdlp_entry, &cache_dir);
+    let ffmpeg_url =
+        std::env::var("MEDIAKIT_FFMPEG_URL").unwrap_or_else(|_| ffmpeg_entry.url.clone());
+    let ytdlp_url = std::env::var("MEDIAKIT_YTDLP_URL").unwrap_or_else(|_| ytdlp_entry.url.clone());
+
+    let ffmpeg_archive = fetch_and_verify("ffmpeg", ffmpeg_entry, &ffmpeg_url, &cache_root);
+    let ytdlp_raw = fetch_and_verify("yt-dlp", ytdlp_entry, &ytdlp_url, &cache_root);
 
     let (ffmpeg_bin, ffprobe_bin) = extract_ffmpeg(&ffmpeg_archive, ffmpeg_entry);
 
@@ -109,10 +139,45 @@ fn main() {
     );
     fs::write(out_dir.join("vendor_generated.rs"), generated).expect("write vendor_generated.rs");
 
-    println!(
-        "cargo:warning=mediakit-core: bundling ffmpeg {} and yt-dlp {} ({})",
-        ffmpeg_entry.version, ytdlp_entry.version, platform_key
-    );
+    log(&format!(
+        "bundling ffmpeg {} and yt-dlp {} ({platform_key})",
+        ffmpeg_entry.version, ytdlp_entry.version
+    ));
+}
+
+/// Routine progress output. Plain `println!` (not `cargo:warning=...`) would
+/// have cargo silently swallow it anyway since it doesn't start with
+/// `cargo:`, so this goes to stderr instead - visible with `-vv` or on
+/// failure, exactly like other build-script chatter, and opt-in-visible via
+/// `MEDIAKIT_VENDOR_VERBOSE` for anyone actively debugging the vendoring
+/// step. Normal builds doing entirely routine work (cache hit or a clean
+/// download) shouldn't print `warning:` lines - those should be reserved for
+/// things that actually warrant a user's attention.
+fn log(msg: &str) {
+    if std::env::var("MEDIAKIT_VENDOR_VERBOSE").is_ok() {
+        println!("cargo:warning=mediakit-core: {msg}");
+    } else {
+        eprintln!("mediakit-core build: {msg}");
+    }
+}
+
+/// `$CARGO_HOME/mediakit-vendor`. `CARGO_HOME` itself is only set in the
+/// build script's environment if the invoking user explicitly exported it
+/// (cargo does not inject it) - the `CARGO` env var (path to the running
+/// cargo binary) is tempting as a fallback, but is *not* reliable here: a
+/// system-package cargo install (e.g. `/usr/bin/cargo` via a distro
+/// package) still uses `~/.cargo` as its home, with no relation to the
+/// binary's own path, unlike a rustup-managed `~/.cargo/bin/cargo`. So the
+/// fallback matches cargo's own documented default instead: `$HOME/.cargo`
+/// (`%USERPROFILE%\.cargo` on Windows).
+fn vendor_cache_root() -> PathBuf {
+    if let Ok(dir) = std::env::var("CARGO_HOME") {
+        return PathBuf::from(dir).join("mediakit-vendor");
+    }
+    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let home = std::env::var(home_var)
+        .unwrap_or_else(|_| panic!("could not determine home directory ({home_var} not set)"));
+    Path::new(&home).join(".cargo").join("mediakit-vendor")
 }
 
 fn write_compressed(path: &Path, data: &[u8]) {
@@ -120,49 +185,95 @@ fn write_compressed(path: &Path, data: &[u8]) {
     fs::write(path, compressed).expect("write compressed vendored binary");
 }
 
-/// Download (or reuse a cached copy of) `entry.url`, verify its SHA-256
-/// against `entry.sha256`, and return the raw bytes. Panics loudly on any
-/// checksum mismatch - a corrupted or tampered vendored binary must never
-/// silently ship.
-fn fetch_and_verify(entry: &VendorEntry, cache_dir: &Path) -> Vec<u8> {
-    let filename = entry
-        .url
-        .rsplit('/')
-        .next()
-        .expect("vendor url has no filename");
-    let cache_path = cache_dir.join(filename);
-
-    let bytes = if let Ok(manual_dir) = std::env::var("MEDIAKIT_VENDOR_DIR") {
+/// Download (or reuse a cached copy of) `url`, verify its SHA-256 against
+/// `entry.sha256`, and return the raw bytes. Panics loudly - with the URL
+/// and both hashes - on any checksum mismatch or download failure: a
+/// corrupted, tampered, or merely-wrong vendored binary must never silently
+/// ship.
+fn fetch_and_verify(name: &str, entry: &VendorEntry, url: &str, cache_root: &Path) -> Vec<u8> {
+    if let Ok(manual_dir) = std::env::var("MEDIAKIT_VENDOR_DIR") {
+        let filename = url.rsplit('/').next().expect("vendor url has no filename");
         let manual_path = PathBuf::from(manual_dir).join(filename);
-        fs::read(&manual_path).unwrap_or_else(|e| {
+        let bytes = fs::read(&manual_path).unwrap_or_else(|e| {
             panic!(
                 "MEDIAKIT_VENDOR_DIR is set but couldn't read {}: {e}",
                 manual_path.display()
             )
-        })
-    } else if let Ok(cached) = fs::read(&cache_path) {
-        cached
-    } else {
-        println!("cargo:warning=mediakit-core: downloading {}", entry.url);
-        let downloaded = download(&entry.url);
-        fs::write(&cache_path, &downloaded).expect("write vendor cache file");
-        downloaded
-    };
-
-    let actual_sha256 = sha256_hex(&bytes);
-    if actual_sha256 != entry.sha256 {
-        // Never trust a cached/manual file that fails verification: remove
-        // it so the next build attempt re-downloads instead of reusing a
-        // bad cache entry forever.
-        let _ = fs::remove_file(&cache_path);
-        panic!(
-            "checksum mismatch for {}: expected {}, got {actual_sha256}. \
-             Refusing to bundle an unverified binary.",
-            entry.url, entry.sha256
-        );
+        });
+        verify_checksum(&bytes, entry, url);
+        return bytes;
     }
 
+    // Keyed on name + version + a checksum prefix, not just the URL's
+    // filename: a `vendor.toml` bump to a new pinned release (new version,
+    // new hash) must never resolve to a stale cache entry, and a cache hit
+    // must never be trusted without knowing the exact bytes it was verified
+    // against.
+    let sha_prefix = &entry.sha256[..entry.sha256.len().min(16)];
+    let entry_dir = cache_root.join(format!("{name}-{}-{sha_prefix}", entry.version));
+    let filename = url.rsplit('/').next().expect("vendor url has no filename");
+    let cache_path = entry_dir.join(filename);
+
+    // Fast path: a fully-written cache file is only ever placed via an
+    // atomic rename (see below), so if it's present and its checksum
+    // matches, it's safe to reuse without taking the lock at all - reads
+    // never race writes into existence, only into non-existence-then-full.
+    if let Ok(bytes) = fs::read(&cache_path) {
+        if sha256_hex(&bytes) == entry.sha256 {
+            log(&format!("using cached {name} ({})", entry.version));
+            return bytes;
+        }
+    }
+
+    fs::create_dir_all(&entry_dir)
+        .unwrap_or_else(|e| panic!("create vendor cache dir {}: {e}", entry_dir.display()));
+    let _lock = FileLock::acquire(entry_dir.join(".lock"));
+
+    // Re-check under the lock: another concurrent build (e.g. `cargo test`
+    // building the lib and a separate test binary target at once) may have
+    // finished the download while we were waiting for it.
+    if let Ok(bytes) = fs::read(&cache_path) {
+        if sha256_hex(&bytes) == entry.sha256 {
+            log(&format!("using cached {name} ({})", entry.version));
+            return bytes;
+        }
+    }
+
+    log(&format!("downloading {name} {} from {url}", entry.version));
+    let bytes = download(url);
+    verify_checksum(&bytes, entry, url);
+
+    // Write-then-rename so a build killed mid-download can never leave a
+    // partial file that a later run's cache-hit check treats as valid.
+    let tmp_path = entry_dir.join(format!("{filename}.tmp.{}", std::process::id()));
+    fs::write(&tmp_path, &bytes)
+        .unwrap_or_else(|e| panic!("write temp download file {}: {e}", tmp_path.display()));
+    fs::rename(&tmp_path, &cache_path).unwrap_or_else(|e| {
+        panic!(
+            "move downloaded file into place at {}: {e}",
+            cache_path.display()
+        )
+    });
+
     bytes
+}
+
+fn verify_checksum(bytes: &[u8], entry: &VendorEntry, url: &str) {
+    let actual_sha256 = sha256_hex(bytes);
+    if actual_sha256 != entry.sha256 {
+        panic!(
+            "checksum mismatch downloading vendored binary\n  \
+             url:      {url}\n  \
+             expected: {}\n  \
+             actual:   {actual_sha256}\n\
+             Refusing to bundle an unverified binary. If the upstream release \
+             was legitimately updated in place, re-verify the new checksum \
+             from the publisher's own checksums file and update vendor.toml. \
+             If a pinned tag was pruned, try MEDIAKIT_FFMPEG_URL / \
+             MEDIAKIT_YTDLP_URL to point at a mirror serving the same bytes.",
+            entry.sha256
+        );
+    }
 }
 
 fn download(url: &str) -> Vec<u8> {
@@ -191,6 +302,60 @@ fn hex_encode(bytes: &[u8]) -> String {
         write!(s, "{b:02x}").unwrap();
     }
     s
+}
+
+/// A cross-process advisory lock built from a plain marker file rather than
+/// OS file-locking primitives, so downloading the same pinned binary from
+/// two cargo target builds running concurrently (e.g. `cargo test
+/// --all-targets` building the lib and a separately-profiled test binary at
+/// once) can't race into a half-written cache entry. `create_new` is
+/// atomic - only one concurrent caller can ever succeed in creating the
+/// file - which is all the mutual exclusion this needs.
+struct FileLock {
+    path: PathBuf,
+}
+
+impl FileLock {
+    fn acquire(path: PathBuf) -> Self {
+        const STALE_AFTER: Duration = Duration::from_secs(300);
+        let started = Instant::now();
+        loop {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut f) => {
+                    use std::io::Write;
+                    let _ = write!(f, "{}", std::process::id());
+                    return Self { path };
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if started.elapsed() > STALE_AFTER {
+                        // A prior build process almost certainly crashed
+                        // (or was killed) while holding this lock rather
+                        // than releasing it - waiting forever would hang
+                        // every subsequent build. Reclaim it and retry.
+                        println!(
+                            "cargo:warning=mediakit-core: vendor cache lock at {} is over 5 minutes \
+                             old; assuming it's stale from a killed build and reclaiming it",
+                            path.display()
+                        );
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                Err(e) => panic!("failed to create vendor cache lock {}: {e}", path.display()),
+            }
+        }
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 /// Extract the `ffmpeg`/`ffprobe` binaries from a downloaded archive.
