@@ -66,7 +66,12 @@ jobs:
         run: cargo clippy --workspace --all-targets ${{ steps.features.outputs.flags }} -- -D warnings
 
       - name: Test
-        run: cargo test --workspace --verbose ${{ steps.features.outputs.flags }}
+        run: cargo test --workspace --all-targets --locked --verbose ${{ steps.features.outputs.flags }}
+
+      # `--all-targets` deliberately excludes doctests (a longstanding
+      # cargo wart), so they need their own invocation to actually run.
+      - name: Doc tests
+        run: cargo test --workspace --doc --locked --verbose ${{ steps.features.outputs.flags }}
 
       - name: Build (release profile)
         run: cargo build --workspace --release ${{ steps.features.outputs.flags }}

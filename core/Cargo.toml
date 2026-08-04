@@ -41,6 +41,15 @@ windows-sys = { version = "0.61.2", features = [
 [dev-dependencies]
 tempfile = "3"
 
+# Owns its own `main()` (no libtest harness) so it can react to
+# MEDIAKIT_SLEEPER_CHILD before any argv parsing happens - see the doc
+# comment at the top of the file for why that's required, not just
+# convenient.
+[[test]]
+name = "cancellation"
+path = "tests/cancellation.rs"
+harness = false
+
 [build-dependencies]
 serde = { workspace = true, features = ["derive"] }
 sha2 = "0.11.0"
