@@ -4,6 +4,7 @@
 use crate::command::{build_args, EncodePass};
 use crate::error::CoreError;
 use crate::job::{JobId, JobProgressInfo, JobSpec};
+use crate::procgroup::ProcessGroup;
 use crate::progress::{self, ProgressParser};
 use ffmpeg_sidecar::child::FfmpegChild;
 use ffmpeg_sidecar::command::FfmpegCommand;
@@ -13,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
@@ -44,22 +46,68 @@ pub enum EngineEvent {
     },
 }
 
+/// Why a job was cancelled. Currently there's only one source of
+/// cancellation, but this exists (rather than a bare `bool`/`AtomicBool`) so
+/// that `Cancelled` is always emitted *because this was explicitly set*,
+/// never inferred from a process's exit status - Windows has no equivalent
+/// of Unix's "terminated by signal" exit-status shape, so exit-code
+/// classification can never be the source of truth for "was this a user
+/// cancellation."
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelReason {
+    User,
+}
+
+/// The running child process for a job's current pass, plus a handle able
+/// to kill its whole process tree (not just this direct child - see
+/// [`crate::procgroup`]) in one shot.
+struct ActiveChild {
+    child: Arc<Mutex<FfmpegChild>>,
+    group: Arc<ProcessGroup>,
+}
+
 struct ActiveJob {
     /// Populated once the current pass's ffmpeg process has actually spawned.
     /// `None` for the brief window between a job being dequeued and its
-    /// first `spawn()` returning - `cancelled` is checked immediately after
-    /// that window closes so a cancel landing during it isn't lost.
-    child_slot: Arc<Mutex<Option<Arc<Mutex<FfmpegChild>>>>>,
-    cancelled: Arc<AtomicBool>,
+    /// first `spawn()` returning - `cancel_reason` is checked immediately
+    /// after that window closes so a cancel landing during it isn't lost.
+    child_slot: Arc<Mutex<Option<ActiveChild>>>,
+    cancel_reason: Arc<Mutex<Option<CancelReason>>>,
+}
+
+/// Queued and in-flight jobs, behind a single lock. Keeping both under one
+/// `Mutex` (rather than a separate lock per collection, as this used to be)
+/// closes a real race: a worker dequeuing a job and registering it as
+/// active used to be two separate critical sections, and a `cancel()` that
+/// landed in the gap between them would find the job in neither place and
+/// silently do nothing. With one lock, "remove from the queue" and "become
+/// active" are the same atomic step, so `cancel()` can never observe that
+/// gap.
+struct QueueState {
+    queue: VecDeque<JobSpec>,
+    active: HashMap<JobId, ActiveJob>,
 }
 
 struct Shared {
-    queue: Mutex<VecDeque<JobSpec>>,
+    state: Mutex<QueueState>,
     condvar: Condvar,
     shutdown: AtomicBool,
-    active: Mutex<HashMap<JobId, ActiveJob>>,
     events: Sender<EngineEvent>,
     ffmpeg_path: PathBuf,
+}
+
+impl Shared {
+    /// The single place a terminal event (`Done` | `Failed` | `Cancelled`)
+    /// for an active job is ever sent. `HashMap::remove` only ever succeeds
+    /// for the first caller, so if two code paths somehow both decide a job
+    /// has reached a terminal state at once, only the first one's event
+    /// actually gets sent - guaranteeing exactly one terminal event per job.
+    fn emit_terminal(&self, id: JobId, event: EngineEvent) {
+        let removed = self.state.lock().unwrap().active.remove(&id).is_some();
+        if removed {
+            let _ = self.events.send(event);
+        }
+    }
 }
 
 /// A pool of worker threads that pull [`JobSpec`]s off a queue and run them
@@ -73,10 +121,12 @@ impl JobEngine {
     pub fn new(ffmpeg_path: PathBuf, concurrency: usize) -> (Self, Receiver<EngineEvent>) {
         let (tx, rx) = mpsc::channel();
         let shared = Arc::new(Shared {
-            queue: Mutex::new(VecDeque::new()),
+            state: Mutex::new(QueueState {
+                queue: VecDeque::new(),
+                active: HashMap::new(),
+            }),
             condvar: Condvar::new(),
             shutdown: AtomicBool::new(false),
-            active: Mutex::new(HashMap::new()),
             events: tx,
             ffmpeg_path,
         });
@@ -93,42 +143,40 @@ impl JobEngine {
     }
 
     pub fn submit(&self, spec: JobSpec) {
-        let mut queue = self.shared.queue.lock().unwrap();
-        queue.push_back(spec);
+        let mut state = self.shared.state.lock().unwrap();
+        state.queue.push_back(spec);
         self.shared.condvar.notify_one();
     }
 
-    /// Cancel a job, whether it's still queued or actively running.
+    /// Cancel a job, whether it's still queued or actively running. A job
+    /// that has already reached a terminal state (nowhere to be found in
+    /// either the queue or the active map) is a silent no-op - cancelling
+    /// something that already finished is not an error.
     pub fn cancel(&self, id: JobId) {
-        {
-            let mut queue = self.shared.queue.lock().unwrap();
-            if let Some(pos) = queue.iter().position(|j| j.id == id) {
-                queue.remove(pos);
-                let _ = self.shared.events.send(EngineEvent::Cancelled { id });
-                return;
-            }
+        let mut state = self.shared.state.lock().unwrap();
+        if let Some(pos) = state.queue.iter().position(|j| j.id == id) {
+            state.queue.remove(pos);
+            drop(state);
+            let _ = self.shared.events.send(EngineEvent::Cancelled { id });
+            return;
         }
 
-        let active = self.shared.active.lock().unwrap();
-        if let Some(job) = active.get(&id) {
+        if let Some(job) = state.active.get(&id) {
             kill_active_job(job);
         }
     }
 
     pub fn cancel_all(&self) {
-        let queued_ids: Vec<JobId> = {
-            let mut queue = self.shared.queue.lock().unwrap();
-            let ids = queue.iter().map(|j| j.id).collect::<Vec<_>>();
-            queue.clear();
-            ids
-        };
+        let mut state = self.shared.state.lock().unwrap();
+        let queued_ids: Vec<JobId> = state.queue.iter().map(|j| j.id).collect();
+        state.queue.clear();
+        for job in state.active.values() {
+            kill_active_job(job);
+        }
+        drop(state);
+
         for id in queued_ids {
             let _ = self.shared.events.send(EngineEvent::Cancelled { id });
-        }
-
-        let active = self.shared.active.lock().unwrap();
-        for job in active.values() {
-            kill_active_job(job);
         }
     }
 }
@@ -145,33 +193,90 @@ impl Drop for JobEngine {
 
 fn worker_loop(shared: Arc<Shared>) {
     loop {
-        let spec = {
-            let mut queue = shared.queue.lock().unwrap();
+        let dequeued = {
+            let mut state = shared.state.lock().unwrap();
             loop {
-                if let Some(spec) = queue.pop_front() {
-                    break Some(spec);
+                if let Some(spec) = state.queue.pop_front() {
+                    // Register as active in the same critical section as the
+                    // dequeue - see the `QueueState` doc comment for why.
+                    let cancel_reason = Arc::new(Mutex::new(None));
+                    let child_slot = Arc::new(Mutex::new(None));
+                    state.active.insert(
+                        spec.id,
+                        ActiveJob {
+                            child_slot: Arc::clone(&child_slot),
+                            cancel_reason: Arc::clone(&cancel_reason),
+                        },
+                    );
+                    break Some((spec, cancel_reason, child_slot));
                 }
                 if shared.shutdown.load(Ordering::SeqCst) {
                     break None;
                 }
-                queue = shared.condvar.wait(queue).unwrap();
+                state = shared.condvar.wait(state).unwrap();
             }
         };
 
-        let Some(spec) = spec else { break };
-        run_job(&shared, spec);
+        let Some((spec, cancel_reason, child_slot)) = dequeued else {
+            break;
+        };
+        run_job(&shared, spec, cancel_reason, child_slot);
     }
 }
 
-/// Kill an active job's ffmpeg process if it has spawned yet, and mark it
-/// cancelled either way so a spawn racing with this call kills itself
-/// immediately once it notices the flag (see [`run_job`]).
+/// Kill an active job's ffmpeg process (whole tree, not just the direct
+/// child) if it has spawned yet, and mark it cancelled either way so a
+/// spawn racing with this call kills itself immediately once it notices the
+/// flag (see [`run_job`]).
 fn kill_active_job(job: &ActiveJob) {
-    job.cancelled.store(true, Ordering::SeqCst);
-    if let Some(child) = job.child_slot.lock().unwrap().as_ref() {
-        let _ = child.lock().unwrap().kill();
+    *job.cancel_reason.lock().unwrap() = Some(CancelReason::User);
+    if let Some(active) = job.child_slot.lock().unwrap().as_ref() {
+        active.group.kill();
+        let _ = active.child.lock().unwrap().kill();
     }
 }
+
+/// Wait for a thread with a bounded timeout so a stuck reader can never hang
+/// cancellation indefinitely. If the deadline passes first, the thread is
+/// left detached (it'll finish on its own eventually, once whatever it's
+/// blocked on unblocks) rather than joined.
+fn join_with_timeout<T: Send + 'static>(
+    handle: std::thread::JoinHandle<T>,
+    timeout: Duration,
+) -> Option<T> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if handle.is_finished() {
+            return handle.join().ok();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    None
+}
+
+/// As above, but for reaping the child process itself via polling
+/// `try_wait()` rather than a blocking `wait()` - so a process that somehow
+/// survives being killed can't hang cancellation either.
+fn wait_with_timeout(
+    child: &Arc<Mutex<FfmpegChild>>,
+    timeout: Duration,
+) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(Some(status)) = child.lock().unwrap().as_inner_mut().try_wait() {
+            return Some(status);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Reader threads and the final process reap are all bounded by this, so a
+/// hung pipe or zombie process can never turn a cancellation into an
+/// indefinite hang.
+const REAP_TIMEOUT: Duration = Duration::from_secs(10);
 
 enum AttemptOutcome {
     Success,
@@ -189,14 +294,14 @@ fn run_attempt(
     settings: &crate::command::EncodeSettings,
     passes: &[EncodePass],
     total_duration_seconds: f64,
-    cancelled: &Arc<AtomicBool>,
-    child_slot: &Arc<Mutex<Option<Arc<Mutex<FfmpegChild>>>>>,
+    cancel_reason: &Arc<Mutex<Option<CancelReason>>>,
+    child_slot: &Arc<Mutex<Option<ActiveChild>>>,
     combined_log: &mut String,
 ) -> AttemptOutcome {
     let pass_count = passes.len().max(1);
 
     for (pass_index, pass) in passes.iter().enumerate() {
-        if cancelled.load(Ordering::SeqCst) {
+        if cancel_reason.lock().unwrap().is_some() {
             return AttemptOutcome::Cancelled;
         }
 
@@ -206,10 +311,17 @@ fn run_attempt(
             .arg("-progress")
             .arg("pipe:1")
             .arg("-nostats");
+        crate::procgroup::prepare(cmd.as_inner_mut());
 
         let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(source) => {
+                // A cancel could have raced the spawn attempt itself; a
+                // cancel request always produces exactly one `Cancelled`
+                // event, even when nothing ever actually spawned.
+                if cancel_reason.lock().unwrap().is_some() {
+                    return AttemptOutcome::Cancelled;
+                }
                 let error = CoreError::Spawn {
                     binary: shared.ffmpeg_path.clone(),
                     source,
@@ -219,15 +331,31 @@ fn run_attempt(
             }
         };
 
+        // Best-effort: if the process couldn't be put under tree-kill
+        // control, still proceed rather than failing the whole job - the
+        // direct `Child::kill()` below still works for the (common) case
+        // where the process never spawns children of its own.
+        let group = match crate::procgroup::adopt(child.as_inner()) {
+            Ok(group) => Arc::new(group),
+            Err(err) => {
+                tracing::warn!("process-tree kill unavailable for this job: {err}");
+                Arc::new(ProcessGroup::noop())
+            }
+        };
+
         let stdout = child.take_stdout();
         let stderr = child.take_stderr();
 
         let child = Arc::new(Mutex::new(child));
-        *child_slot.lock().unwrap() = Some(Arc::clone(&child));
+        *child_slot.lock().unwrap() = Some(ActiveChild {
+            child: Arc::clone(&child),
+            group: Arc::clone(&group),
+        });
 
         // A cancel() may have raced us and set the flag while the slot was
         // still empty (so it couldn't kill anything). Catch that here.
-        if cancelled.load(Ordering::SeqCst) {
+        if cancel_reason.lock().unwrap().is_some() {
+            group.kill();
             let _ = child.lock().unwrap().kill();
         }
 
@@ -243,41 +371,48 @@ fn run_attempt(
             })
         });
 
-        if let Some(stdout) = stdout {
-            let reader = BufReader::new(stdout);
-            let mut parser = ProgressParser::new();
-            for line in reader.lines().map_while(Result::ok) {
-                if let Some(update) = parser.feed_line(&line) {
-                    let pass_percent = progress::percent(&update, total_duration_seconds);
-                    let overall_percent = pass_percent
-                        .map(|p| ((pass_index as f64) + p / 100.0) / (pass_count as f64) * 100.0);
-                    let info = JobProgressInfo {
-                        percent: overall_percent,
-                        eta: progress::eta(&update, total_duration_seconds),
-                        speed: update.speed,
-                        pass_index,
-                        pass_count,
-                    };
-                    let _ = shared.events.send(EngineEvent::Progress { id, info });
+        let stdout_handle = stdout.map(|stdout| {
+            let events = shared.events.clone();
+            std::thread::spawn(move || {
+                let reader = BufReader::new(stdout);
+                let mut parser = ProgressParser::new();
+                for line in reader.lines().map_while(Result::ok) {
+                    if let Some(update) = parser.feed_line(&line) {
+                        let pass_percent = progress::percent(&update, total_duration_seconds);
+                        let overall_percent = pass_percent.map(|p| {
+                            ((pass_index as f64) + p / 100.0) / (pass_count as f64) * 100.0
+                        });
+                        let info = JobProgressInfo {
+                            percent: overall_percent,
+                            eta: progress::eta(&update, total_duration_seconds),
+                            speed: update.speed,
+                            pass_index,
+                            pass_count,
+                        };
+                        let _ = events.send(EngineEvent::Progress { id, info });
+                    }
                 }
-            }
-        }
+            })
+        });
 
+        if let Some(handle) = stdout_handle {
+            join_with_timeout(handle, REAP_TIMEOUT);
+        }
         let stderr_log = stderr_handle
-            .and_then(|h| h.join().ok())
+            .and_then(|h| join_with_timeout(h, REAP_TIMEOUT))
             .unwrap_or_default();
         combined_log.push_str(&stderr_log);
 
-        let exit_status = child.lock().unwrap().wait();
+        let exit_status = wait_with_timeout(&child, REAP_TIMEOUT);
         *child_slot.lock().unwrap() = None;
 
-        if cancelled.load(Ordering::SeqCst) {
+        if cancel_reason.lock().unwrap().is_some() {
             return AttemptOutcome::Cancelled;
         }
 
         match exit_status {
-            Ok(status) if status.success() => {}
-            Ok(status) => {
+            Some(status) if status.success() => {}
+            Some(status) => {
                 let error = CoreError::EncodeFailed {
                     code: status.code(),
                     stderr: combined_log.clone(),
@@ -285,9 +420,10 @@ fn run_attempt(
                 .to_string();
                 return AttemptOutcome::Failed { error };
             }
-            Err(err) => {
+            None => {
                 return AttemptOutcome::Failed {
-                    error: err.to_string(),
+                    error: "ffmpeg did not exit within the timeout after its pipes closed"
+                        .to_string(),
                 };
             }
         }
@@ -296,21 +432,13 @@ fn run_attempt(
     AttemptOutcome::Success
 }
 
-fn run_job(shared: &Shared, spec: JobSpec) {
+fn run_job(
+    shared: &Shared,
+    spec: JobSpec,
+    cancel_reason: Arc<Mutex<Option<CancelReason>>>,
+    child_slot: Arc<Mutex<Option<ActiveChild>>>,
+) {
     let id = spec.id;
-
-    // Register the job (with an empty child slot) *before* announcing it has
-    // started, so a `cancel()` that arrives in the gap between dequeuing and
-    // the first successful `spawn()` is never silently dropped.
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let child_slot: Arc<Mutex<Option<Arc<Mutex<FfmpegChild>>>>> = Arc::new(Mutex::new(None));
-    shared.active.lock().unwrap().insert(
-        id,
-        ActiveJob {
-            child_slot: Arc::clone(&child_slot),
-            cancelled: Arc::clone(&cancelled),
-        },
-    );
 
     let _ = shared.events.send(EngineEvent::Started { id });
 
@@ -326,16 +454,15 @@ fn run_job(shared: &Shared, spec: JobSpec) {
             &settings,
             &spec.passes,
             spec.total_duration_seconds,
-            &cancelled,
+            &cancel_reason,
             &child_slot,
             &mut combined_log,
         );
 
         match outcome {
             AttemptOutcome::Cancelled => {
-                shared.active.lock().unwrap().remove(&id);
                 cleanup_passlogs(&spec.passes);
-                let _ = shared.events.send(EngineEvent::Cancelled { id });
+                shared.emit_terminal(id, EngineEvent::Cancelled { id });
                 return;
             }
             AttemptOutcome::Failed { error } => {
@@ -359,13 +486,15 @@ fn run_job(shared: &Shared, spec: JobSpec) {
                     continue;
                 }
 
-                shared.active.lock().unwrap().remove(&id);
                 cleanup_passlogs(&spec.passes);
-                let _ = shared.events.send(EngineEvent::Failed {
+                shared.emit_terminal(
                     id,
-                    error,
-                    log: combined_log,
-                });
+                    EngineEvent::Failed {
+                        id,
+                        error,
+                        log: combined_log,
+                    },
+                );
                 return;
             }
             AttemptOutcome::Success => {
@@ -402,12 +531,14 @@ fn run_job(shared: &Shared, spec: JobSpec) {
                     }
                 }
 
-                shared.active.lock().unwrap().remove(&id);
                 cleanup_passlogs(&spec.passes);
-                let _ = shared.events.send(EngineEvent::Done {
+                shared.emit_terminal(
                     id,
-                    log: combined_log,
-                });
+                    EngineEvent::Done {
+                        id,
+                        log: combined_log,
+                    },
+                );
                 return;
             }
         }
@@ -445,11 +576,120 @@ mod tests {
     };
     use crate::job::{JobSpec, TargetSizePolicy};
     use std::process::Command;
-    use std::time::{Duration, Instant};
 
-    /// These tests spawn a *real* ffmpeg to validate the engine end-to-end.
-    /// They skip (rather than fail) when ffmpeg isn't on PATH, since CI
-    /// images for some targets don't ship it.
+    /// Path to the `sleeper` test-helper binary (see `src/bin/sleeper.rs`),
+    /// built automatically by Cargo as part of this same package because
+    /// these tests depend on it.
+    /// `CARGO_BIN_EXE_<name>` is only populated for integration tests (files
+    /// under `tests/`), not for unit tests like these that live inside the
+    /// library itself - so instead, locate `sleeper` the way Cargo actually
+    /// lays it out: as a sibling of the running test binary's `deps/`
+    /// directory, in the same `target/<profile>/` folder. Requires
+    /// `cargo test` to have built the whole package (which the workspace
+    /// `cargo test` in CI always does), not just the `--lib` unit target in
+    /// isolation.
+    fn sleeper_path() -> PathBuf {
+        let mut path = std::env::current_exe().expect("failed to resolve current test exe path");
+        path.pop(); // drop the test binary's own file name
+        if path.ends_with("deps") {
+            path.pop();
+        }
+        path.push(if cfg!(windows) {
+            "sleeper.exe"
+        } else {
+            "sleeper"
+        });
+        assert!(
+            path.is_file(),
+            "expected the `sleeper` test-helper binary at {path:?} - \
+             run `cargo test` for the whole package (not just `--lib`) so it gets built"
+        );
+        path
+    }
+
+    fn sleeper_settings(output: PathBuf, extra_args: Vec<String>) -> EncodeSettings {
+        EncodeSettings {
+            input: PathBuf::from("unused-input"),
+            output,
+            container: Container::Mp4,
+            video: Some(VideoSettings::default()),
+            audio: Some(AudioSettings::default()),
+            trim: Trim::default(),
+            overwrite: true,
+            extra_args,
+            ..Default::default()
+        }
+    }
+
+    /// A job that runs the `sleeper` binary in place of ffmpeg - real
+    /// process, real pipes, real cross-platform spawn/kill behavior, but no
+    /// dependency on ffmpeg being installed or on real media.
+    fn sleeper_spec(id: JobId, output: PathBuf, extra_args: Vec<String>) -> JobSpec {
+        JobSpec {
+            id,
+            settings: sleeper_settings(output, extra_args),
+            passes: vec![EncodePass::Single],
+            total_duration_seconds: 120.0,
+            target_size: None,
+        }
+    }
+
+    /// Drain events off `rx` into `events`, stopping as soon as `done`
+    /// returns true for the events accumulated so far (checked before *and*
+    /// after each receive, so already-buffered events count immediately).
+    /// Returns whether `done` was satisfied before `timeout` elapsed.
+    fn wait_until(
+        rx: &Receiver<EngineEvent>,
+        events: &mut Vec<EngineEvent>,
+        timeout: Duration,
+        mut done: impl FnMut(&[EngineEvent]) -> bool,
+    ) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if done(events) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return done(events);
+            }
+            if let Ok(event) = rx.recv_timeout(Duration::from_millis(100)) {
+                events.push(event);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn process_is_alive(pid: u32) -> bool {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+
+    #[cfg(windows)]
+    fn process_is_alive(pid: u32) -> bool {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        const STILL_ACTIVE: u32 = 259;
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return false;
+            }
+            let mut code = 0u32;
+            let ok = GetExitCodeProcess(handle, &mut code);
+            CloseHandle(handle);
+            ok != 0 && code == STILL_ACTIVE
+        }
+    }
+
+    // ---- these tests spawn a *real* ffmpeg to validate the engine
+    // end-to-end; they skip (rather than fail) when ffmpeg isn't on PATH,
+    // since CI images for some targets don't ship it. Cancellation
+    // semantics specifically are covered by the hermetic `sleeper`-based
+    // tests below instead, since those are exactly the platform-sensitive
+    // spawn/kill paths that must never depend on an external binary being
+    // present. ----
+
     fn ffmpeg_on_path() -> Option<PathBuf> {
         crate::ffmpeg_env::locate_binary("ffmpeg", &std::env::temp_dir())
     }
@@ -534,122 +774,323 @@ mod tests {
 
     #[test]
     fn cancel_kills_a_running_job() {
-        let Some(ffmpeg) = ffmpeg_on_path() else {
-            eprintln!("skipping: ffmpeg not found on PATH");
-            return;
-        };
         let tmp = tempfile::tempdir().unwrap();
-        let input = tmp.path().join("in.mp4");
-        synth_clip(&ffmpeg, &input, 20);
-
         let output = tmp.path().join("out.mp4");
-        // Deliberately expensive settings (upscale + slowest preset) so the
-        // encode takes long enough in wall-clock time for the cancel to
-        // reliably land while it's still running rather than racing a
-        // near-instant encode of a tiny clip.
-        let mut settings = base_settings(input, output);
-        settings.video = Some(VideoSettings {
-            codec: VideoCodec::H264,
-            crf: Some(18),
-            preset: Some("veryslow".to_string()),
-            width: Some(1920),
-            height: Some(1080),
-            ..Default::default()
-        });
-        let spec = JobSpec {
-            id: 7,
-            settings,
-            passes: vec![EncodePass::Single],
-            total_duration_seconds: 20.0,
-            target_size: None,
-        };
+        let spec = sleeper_spec(7, output, vec![]);
 
-        let (engine, rx) = JobEngine::new(ffmpeg, 1);
+        let (engine, rx) = JobEngine::new(sleeper_path(), 1);
         engine.submit(spec);
 
         // Wait for a real Progress update (not just Started) so the cancel
-        // lands while the worker is genuinely blocked reading ffmpeg's
-        // stdout mid-encode, not just during the dequeue/spawn window.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
-            if let Ok(EngineEvent::Progress { info, .. }) = rx.recv_timeout(Duration::from_secs(1))
-            {
-                if info.percent.is_some() {
-                    break;
-                }
-            }
-        }
+        // lands while the worker is genuinely blocked reading the child's
+        // stdout mid-"encode", not just during the dequeue/spawn window.
+        let mut events = Vec::new();
+        let saw_progress = wait_until(&rx, &mut events, Duration::from_secs(10), |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, EngineEvent::Progress { info, .. } if info.percent.is_some()))
+        });
+        assert!(
+            saw_progress,
+            "never saw a real Progress update before cancelling; observed:\n{events:#?}"
+        );
 
         engine.cancel(7);
 
-        let mut saw_cancelled = false;
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while Instant::now() < deadline {
-            match rx.recv_timeout(Duration::from_secs(1)) {
-                Ok(EngineEvent::Cancelled { id: 7 }) => {
-                    saw_cancelled = true;
-                    break;
-                }
-                Ok(EngineEvent::Done { .. }) => panic!("job completed instead of being cancelled"),
-                _ => {}
-            }
-        }
-        assert!(saw_cancelled, "never saw a Cancelled event");
+        let saw_cancelled = wait_until(&rx, &mut events, Duration::from_secs(15), |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, EngineEvent::Cancelled { id: 7 }))
+        });
+        assert!(
+            saw_cancelled,
+            "never saw a Cancelled event; observed events:\n{events:#?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, EngineEvent::Done { .. } | EngineEvent::Failed { .. })),
+            "a cancelled job must never also report Done/Failed; observed:\n{events:#?}"
+        );
+    }
+
+    #[test]
+    fn cancel_before_spawn_completes_still_reports_cancelled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let output = tmp.path().join("out.mp4");
+        let spec = sleeper_spec(1, output, vec![]);
+
+        let (engine, rx) = JobEngine::new(sleeper_path(), 1);
+        engine.submit(spec);
+        // Deliberately no synchronization: cancel as fast as possible after
+        // submit, so this often lands in the middle of the
+        // dequeue-then-spawn window rather than comfortably before or
+        // after it - exactly the race that used to be able to silently
+        // drop a cancel.
+        engine.cancel(1);
+
+        let mut events = Vec::new();
+        let cancelled = wait_until(&rx, &mut events, Duration::from_secs(15), |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, EngineEvent::Cancelled { id: 1 }))
+        });
+        assert!(
+            cancelled,
+            "never saw a Cancelled event; observed:\n{events:#?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, EngineEvent::Done { .. } | EngineEvent::Failed { .. })),
+            "a cancelled job must never also report Done/Failed; observed:\n{events:#?}"
+        );
+    }
+
+    #[test]
+    fn cancel_after_natural_completion_is_a_safe_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let output = tmp.path().join("out.mp4");
+        let spec = sleeper_spec(1, output, vec!["--mk-succeed-after-ms=100".to_string()]);
+
+        let (engine, rx) = JobEngine::new(sleeper_path(), 1);
+        engine.submit(spec);
+
+        let mut events = Vec::new();
+        let done = wait_until(&rx, &mut events, Duration::from_secs(10), |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, EngineEvent::Done { id: 1, .. }))
+        });
+        assert!(
+            done,
+            "job never completed naturally; observed:\n{events:#?}"
+        );
+
+        // The job has already reached a terminal state and been removed
+        // from `active` by the time this runs - must be a silent no-op,
+        // not a second event.
+        engine.cancel(1);
+
+        let mut after = Vec::new();
+        let saw_more = wait_until(&rx, &mut after, Duration::from_secs(2), |after| {
+            !after.is_empty()
+        });
+        assert!(
+            !saw_more,
+            "cancelling an already-finished job must not emit another event; observed:\n{after:#?}"
+        );
     }
 
     #[test]
     fn cancel_removes_a_still_queued_job_without_running_it() {
-        let Some(ffmpeg) = ffmpeg_on_path() else {
-            eprintln!("skipping: ffmpeg not found on PATH");
-            return;
-        };
         let tmp = tempfile::tempdir().unwrap();
-        let input = tmp.path().join("in.mp4");
-        synth_clip(&ffmpeg, &input, 3);
 
         // Single worker, occupied by job A, so job B never leaves the queue
         // until we've already cancelled it.
-        let (engine, rx) = JobEngine::new(ffmpeg, 1);
+        let (engine, rx) = JobEngine::new(sleeper_path(), 1);
 
-        let settings_a = base_settings(input.clone(), tmp.path().join("out_a.mp4"));
-        engine.submit(JobSpec {
-            id: 1,
-            settings: settings_a,
-            passes: vec![EncodePass::Single],
-            total_duration_seconds: 3.0,
-            target_size: None,
-        });
-
-        let settings_b = base_settings(input, tmp.path().join("out_b.mp4"));
-        engine.submit(JobSpec {
-            id: 2,
-            settings: settings_b,
-            passes: vec![EncodePass::Single],
-            total_duration_seconds: 3.0,
-            target_size: None,
-        });
+        engine.submit(sleeper_spec(
+            1,
+            tmp.path().join("out_a.mp4"),
+            vec!["--mk-succeed-after-ms=300".to_string()],
+        ));
+        engine.submit(sleeper_spec(2, tmp.path().join("out_b.mp4"), vec![]));
 
         engine.cancel(2);
 
-        let mut saw_b_cancelled = false;
-        let mut saw_b_started = false;
-        let mut saw_a_done = false;
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while Instant::now() < deadline && !saw_a_done {
-            match rx.recv_timeout(Duration::from_secs(1)) {
-                Ok(EngineEvent::Cancelled { id: 2 }) => saw_b_cancelled = true,
-                Ok(EngineEvent::Started { id: 2 }) => saw_b_started = true,
-                Ok(EngineEvent::Done { id: 1, .. }) => saw_a_done = true,
-                Ok(EngineEvent::Failed { id: 1, error, log }) => {
-                    panic!("job A failed: {error}\n{log}")
+        let mut events = Vec::new();
+        let a_done = wait_until(&rx, &mut events, Duration::from_secs(15), |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, EngineEvent::Done { id: 1, .. }))
+        });
+        assert!(
+            a_done,
+            "unrelated job A should have completed normally; observed:\n{events:#?}"
+        );
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EngineEvent::Cancelled { id: 2 })),
+            "queued job was never reported cancelled; observed:\n{events:#?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, EngineEvent::Started { id: 2 })),
+            "cancelled job should never have started; observed:\n{events:#?}"
+        );
+    }
+
+    #[test]
+    fn cancel_all_cancels_the_whole_queue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (engine, rx) = JobEngine::new(sleeper_path(), 1);
+
+        engine.submit(sleeper_spec(1, tmp.path().join("out1.mp4"), vec![]));
+        engine.submit(sleeper_spec(2, tmp.path().join("out2.mp4"), vec![]));
+        engine.submit(sleeper_spec(3, tmp.path().join("out3.mp4"), vec![]));
+
+        // Let job 1 actually start running before cancelling everything, so
+        // this exercises both "kill a running job" and "drop queued jobs"
+        // in the same call.
+        let mut events = Vec::new();
+        wait_until(&rx, &mut events, Duration::from_secs(10), |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, EngineEvent::Started { id: 1 }))
+        });
+
+        engine.cancel_all();
+
+        let all_cancelled = wait_until(&rx, &mut events, Duration::from_secs(15), |events| {
+            [1u64, 2, 3].iter().all(|id| {
+                events
+                    .iter()
+                    .any(|e| matches!(e, EngineEvent::Cancelled { id: got } if got == id))
+            })
+        });
+        assert!(
+            all_cancelled,
+            "not every job was reported cancelled; observed:\n{events:#?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, EngineEvent::Done { .. } | EngineEvent::Failed { .. })),
+            "cancel_all should never let a job finish; observed:\n{events:#?}"
+        );
+    }
+
+    #[test]
+    fn cancelling_a_running_job_leaves_no_orphan_process() {
+        let tmp = tempfile::tempdir().unwrap();
+        let output = tmp.path().join("out.mp4");
+        // `sleeper` always relaunches itself once before doing any work
+        // (simulating a package-manager shim wrapping the real tool - see
+        // its module doc), so the pid it writes here belongs to that
+        // *inner* copy, not the direct child mediakit spawned. That's the
+        // process a naive "kill only the direct child" strategy would
+        // orphan. It's passed explicitly rather than derived from the
+        // output path, since `run_attempt` appends its own trailing
+        // `-progress pipe:1 -nostats` after the real args, so nothing about
+        // this binary's argv shape can be relied on positionally.
+        let pid_file = tmp.path().join("inner.pid");
+        let spec = sleeper_spec(
+            1,
+            output,
+            vec![format!("--mk-pidfile={}", pid_file.display())],
+        );
+
+        let (engine, rx) = JobEngine::new(sleeper_path(), 1);
+        engine.submit(spec);
+
+        let mut events = Vec::new();
+        let saw_progress = wait_until(&rx, &mut events, Duration::from_secs(10), |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, EngineEvent::Progress { info, .. } if info.percent.is_some()))
+        });
+        assert!(
+            saw_progress,
+            "job never produced progress; observed:\n{events:#?}"
+        );
+
+        let inner_pid: u32 = {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(&pid_file) {
+                    if let Ok(pid) = contents.trim().parse() {
+                        break pid;
+                    }
                 }
-                _ => {}
+                assert!(
+                    Instant::now() < deadline,
+                    "sleeper never wrote its pid file"
+                );
+                std::thread::sleep(Duration::from_millis(20));
             }
+        };
+        assert!(
+            process_is_alive(inner_pid),
+            "sleeper's inner process should be running before cancel"
+        );
+
+        engine.cancel(1);
+        let cancelled = wait_until(&rx, &mut events, Duration::from_secs(15), |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, EngineEvent::Cancelled { id: 1 }))
+        });
+        assert!(
+            cancelled,
+            "never saw a Cancelled event; observed:\n{events:#?}"
+        );
+
+        // Give the OS a brief moment to finish tearing the tree down.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while process_is_alive(inner_pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !process_is_alive(inner_pid),
+            "the sleeper's inner process (the 'real' worker behind the shim) survived \
+             cancellation as an orphan - only the direct child was killed"
+        );
+
+        let _ = std::fs::remove_file(&pid_file);
+    }
+
+    #[test]
+    fn emit_terminal_sends_exactly_once_under_concurrent_callers() {
+        let (tx, rx) = mpsc::channel();
+        let shared = Arc::new(Shared {
+            state: Mutex::new(QueueState {
+                queue: VecDeque::new(),
+                active: HashMap::new(),
+            }),
+            condvar: Condvar::new(),
+            shutdown: AtomicBool::new(false),
+            events: tx,
+            ffmpeg_path: PathBuf::new(),
+        });
+        shared.state.lock().unwrap().active.insert(
+            1,
+            ActiveJob {
+                child_slot: Arc::new(Mutex::new(None)),
+                cancel_reason: Arc::new(Mutex::new(None)),
+            },
+        );
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let shared = Arc::clone(&shared);
+                std::thread::spawn(move || {
+                    shared.emit_terminal(
+                        1,
+                        EngineEvent::Done {
+                            id: 1,
+                            log: String::new(),
+                        },
+                    );
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
         }
 
-        assert!(saw_b_cancelled, "queued job was never reported cancelled");
-        assert!(!saw_b_started, "cancelled job should never have started");
-        assert!(saw_a_done, "unrelated job A should have completed normally");
+        let mut received = 0;
+        while rx.recv_timeout(Duration::from_millis(200)).is_ok() {
+            received += 1;
+        }
+        assert_eq!(
+            received, 1,
+            "emit_terminal must guarantee exactly one terminal event per job, \
+             even when multiple callers race to finish it"
+        );
     }
 
     #[test]

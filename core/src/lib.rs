@@ -9,6 +9,7 @@ pub mod hwaccel;
 pub mod job;
 pub mod presets;
 pub mod probe;
+pub mod procgroup;
 pub mod progress;
 pub mod size_presets;
 pub mod sys;
