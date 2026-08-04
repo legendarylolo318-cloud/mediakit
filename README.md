@@ -104,7 +104,7 @@ Distro packagers (AUR, Nixpkgs, etc.) who must not vendor pre-built binaries can
 
 ### Binary size
 
-The default (`bundled`) release binary is roughly **~100 MB** on Linux (it embeds a full static ffmpeg 7.x build plus ffprobe and yt-dlp, zstd-compressed). Windows is in a similar ballpark. `slim` builds are a few MB, since they contain none of that. Exact sizes depend on the pinned ffmpeg/yt-dlp versions in `core/vendor.toml` at the time of a given release; CI prints the actual built size for every release artifact.
+The default (`bundled`) release binary is roughly **~100 MB** on Linux (it embeds a full static ffmpeg build plus ffprobe and yt-dlp, zstd-compressed). Windows is in a similar ballpark. `slim` builds are a few MB, since they contain none of that. The exact ffmpeg/yt-dlp versions bundled (and their sizes) depend entirely on the pins in [`core/vendor.toml`](core/vendor.toml) at the time of a given release, not on anything in this README — check that file for what's actually in a given build; CI prints the actual built size for every release artifact.
 
 ## Target-size presets (`presets.toml`)
 
@@ -148,7 +148,7 @@ No. Everything runs locally via local `ffmpeg`/`yt-dlp` subprocesses. The only n
 No, not with the default build — both are bundled and extracted automatically. See [Slim builds](#slim-builds---no-default-features) if you specifically want MediaKit to use your own install instead.
 
 **Is it legal to bundle ffmpeg? Isn't ffmpeg GPL?**
-MediaKit's own source stays MIT-licensed — it only ever invokes ffmpeg/yt-dlp as a subprocess, never links against their code, so it isn't a derivative work. The bundled ffmpeg build itself is GPL-3.0-or-later (it includes libx264/libx265), and is distributed under its own terms with full compliance materials in [`THIRD_PARTY_LICENSES/`](THIRD_PARTY_LICENSES/) (license texts, source links, and the exact pinned build/version/checksum in `core/vendor.toml`) and an in-app Licenses dialog. yt-dlp is public domain (Unlicense).
+MediaKit's own source stays MIT-licensed — it only ever invokes ffmpeg as a separate subprocess, the same way a shell would launch any other program, and never links against its code (statically or dynamically) or shares process memory with it, so MediaKit isn't a derivative work under the GPL. The bundled ffmpeg build itself is GPL-3.0-or-later (it includes libx264/libx265) and is redistributed here **unmodified**, under its own terms — bundling it alongside an MIT-licensed app is mere aggregation, not a combined work. Full compliance materials are in [`THIRD_PARTY_LICENSES/`](THIRD_PARTY_LICENSES/): license texts, a working source link back to the exact pinned build, and the exact pinned build/version/checksum in `core/vendor.toml`. Same info is in the in-app Licenses dialog. yt-dlp is public domain (Unlicense).
 
 **What am I responsible for when using the Download tab?**
 Complying with the terms of service and copyright law of whatever site/content you're downloading from — MediaKit is a thin wrapper around yt-dlp and doesn't implement or work around any site's DRM or access controls.
@@ -169,4 +169,6 @@ Yes — the Advanced panel has a "Custom ffmpeg args" field appended verbatim to
 
 MediaKit's own source is **MIT** — see [LICENSE](LICENSE).
 
-The default build bundles pre-built third-party binaries under their own licenses: **ffmpeg/ffprobe (GPL-3.0-or-later)** and **yt-dlp (Unlicense/public domain)**. Full texts, source links, and the exact pinned versions are in [`THIRD_PARTY_LICENSES/`](THIRD_PARTY_LICENSES/) and the in-app Licenses dialog. `slim` builds (`--no-default-features`) bundle none of these.
+The default build bundles pre-built third-party binaries under their own licenses: **ffmpeg/ffprobe (GPL-3.0-or-later)** and **yt-dlp (Unlicense/public domain)**. MediaKit invokes both only as subprocesses — it never links against their code — so it isn't a derivative work, and the GPL binary is redistributed unmodified under its own terms (mere aggregation, not a combined work). Full texts, source links back to the exact pinned build, and the exact pinned versions/checksums (`core/vendor.toml`) are in [`THIRD_PARTY_LICENSES/`](THIRD_PARTY_LICENSES/) and the in-app Licenses dialog. `slim` builds (`--no-default-features`) bundle none of these.
+
+See [CHANGELOG.md](CHANGELOG.md) for release history.
