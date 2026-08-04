@@ -338,7 +338,16 @@ fn run_attempt(
         let group = match crate::procgroup::adopt(child.as_inner()) {
             Ok(group) => Arc::new(group),
             Err(err) => {
-                tracing::warn!("process-tree kill unavailable for this job: {err}");
+                // Loud on purpose: this is a real capability loss (a
+                // cancelled job's grandchildren - e.g. a shim launching the
+                // real encoder - can now survive as orphans), not routine
+                // chatter, even though the job itself proceeds normally.
+                tracing::error!(
+                    job_id = id,
+                    error = %err,
+                    "process-tree adoption failed; falling back to killing only the direct \
+                     child on cancel (grandchildren of a wrapper/shim process may survive)"
+                );
                 Arc::new(ProcessGroup::noop())
             }
         };

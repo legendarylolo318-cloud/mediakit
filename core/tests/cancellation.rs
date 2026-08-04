@@ -49,6 +49,11 @@ const EXIT_AFTER_MS_ENV: &str = "MEDIAKIT_SLEEPER_EXIT_AFTER_MS";
 /// Path the child writes its own pid to on startup, so a test can check
 /// whether it's still alive after a supposed cancellation.
 const PIDFILE_ENV: &str = "MEDIAKIT_SLEEPER_PIDFILE";
+/// Set (in *this* process's own env, not the child's - `procgroup::adopt`
+/// runs here, not inside the spawned child) to force process-tree adoption
+/// to fail, exercising the `ProcessGroup::noop()` fallback deliberately -
+/// see `cancel_still_works_when_job_objects_are_disabled`.
+const DISABLE_JOB_OBJECTS_ENV: &str = "MEDIAKIT_DISABLE_JOB_OBJECTS";
 
 const TICK: Duration = Duration::from_millis(100);
 const SAFETY_CAP_TICKS: u64 = 1200; // 120s, so a test that forgets to kill this can never hang CI indefinitely.
@@ -94,6 +99,10 @@ fn main() {
             "cancelling_a_running_job_leaves_no_orphan_process",
             cancelling_a_running_job_leaves_no_orphan_process,
         ),
+        (
+            "cancel_still_works_when_job_objects_are_disabled",
+            cancel_still_works_when_job_objects_are_disabled,
+        ),
     ];
 
     let mut failed = Vec::new();
@@ -106,6 +115,7 @@ fn main() {
         std::env::remove_var(GRANDCHILD_ENV);
         std::env::remove_var(EXIT_AFTER_MS_ENV);
         std::env::remove_var(PIDFILE_ENV);
+        std::env::remove_var(DISABLE_JOB_OBJECTS_ENV);
         match std::panic::catch_unwind(test_fn) {
             Ok(()) => println!("ok"),
             Err(_) => {
@@ -547,4 +557,54 @@ fn cancelling_a_running_job_leaves_no_orphan_process() {
     );
 
     let _ = std::fs::remove_file(&pid_file);
+}
+
+/// When process-tree adoption fails (real-world cause: `AssignProcessToJobObject`
+/// denied by a restrictive parent job, as can happen on some CI runners -
+/// see `MEDIAKIT_DISABLE_JOB_OBJECTS`), cancellation must still complete via
+/// a direct `Child::kill()` rather than hang. This deliberately does *not*
+/// use the grandchild-shim setup the orphan test above does: without a real
+/// process group/job object, a grandchild genuinely can escape (that's the
+/// documented limitation), so this only asserts the thing that must never
+/// regress - the direct child dies and `Cancelled` is still reported
+/// promptly.
+fn cancel_still_works_when_job_objects_are_disabled() {
+    std::env::set_var(DISABLE_JOB_OBJECTS_ENV, "1");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let output = tmp.path().join("out.mp4");
+    let spec = sleeper_spec(1, output);
+
+    let (engine, rx) = JobEngine::new(sleeper_path(), 1);
+    engine.submit(spec);
+
+    let mut events = Vec::new();
+    let saw_progress = wait_until(&rx, &mut events, Duration::from_secs(10), |events| {
+        events
+            .iter()
+            .any(|e| matches!(e, EngineEvent::Progress { info, .. } if info.percent.is_some()))
+    });
+    assert!(
+        saw_progress,
+        "job never produced progress; observed:\n{events:#?}"
+    );
+
+    engine.cancel(1);
+
+    let cancelled = wait_until(&rx, &mut events, Duration::from_secs(15), |events| {
+        events
+            .iter()
+            .any(|e| matches!(e, EngineEvent::Cancelled { id: 1 }))
+    });
+    assert!(
+        cancelled,
+        "cancel with job objects disabled must still report Cancelled promptly (not hang); \
+         observed:\n{events:#?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EngineEvent::Done { .. } | EngineEvent::Failed { .. })),
+        "a cancelled job must never also report Done/Failed; observed:\n{events:#?}"
+    );
 }

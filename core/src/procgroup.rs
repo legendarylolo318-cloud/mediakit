@@ -15,6 +15,22 @@
 //! every process the child tree creates (recursively, as long as none of
 //! them opt out) under one handle that [`ProcessGroup::kill`] can tear down
 //! in one shot.
+//!
+//! **Known limitation:** there's a narrow window between `spawn()`
+//! returning and `adopt()` actually placing the process into a job object /
+//! process group. A grandchild the direct child spawns *inside that window*
+//! (e.g. a package-manager shim execing the real binary immediately on
+//! startup) can escape tree-kill and survive as an orphan after cancel. In
+//! practice `adopt()` runs synchronously on the very next line after
+//! `spawn()`, microseconds later, so losing this race requires the child to
+//! exec a grandchild essentially instantly - `cancelling_a_running_job_leaves_no_orphan_process`
+//! in `core/tests/cancellation.rs` exercises exactly this shape and hasn't
+//! needed to be flake-tolerant of it. The airtight fix is `CREATE_SUSPENDED`
+//! (Windows) / `POSIX_SPAWN_SETSID`-then-`assign`-then-`resume` instead of
+//! plain `spawn()`, which would require dropping down to raw
+//! `CreateProcessW`/`posix_spawn` instead of `std::process::Command` (which
+//! exposes neither); not done here because it's a substantial rewrite for a
+//! race that's real but has never been observed to fire in practice.
 
 use std::io;
 use std::process::{Child, Command};
@@ -27,7 +43,21 @@ pub fn prepare(cmd: &mut Command) {
 
 /// Adopt a just-spawned child (whose `Command` was already [`prepare`]d) so
 /// its whole tree can be killed later via [`ProcessGroup::kill`].
+///
+/// Set `MEDIAKIT_DISABLE_JOB_OBJECTS=1` (any nonempty value) to force this
+/// to fail as if the underlying OS call had, without needing to actually
+/// break job-object/process-group creation on the host - useful for
+/// deliberately exercising the [`Inner::Noop`] fallback (and confirming
+/// cancellation still works via a direct `Child::kill()` rather than
+/// hanging) both in tests and when triaging a CI runner where real job
+/// creation is failing (e.g. `AssignProcessToJobObject` returning
+/// `ERROR_ACCESS_DENIED` under a restrictive parent job).
 pub fn adopt(child: &Child) -> io::Result<ProcessGroup> {
+    if std::env::var_os("MEDIAKIT_DISABLE_JOB_OBJECTS").is_some() {
+        return Err(io::Error::other(
+            "process-tree adoption forced to fail via MEDIAKIT_DISABLE_JOB_OBJECTS",
+        ));
+    }
     imp::adopt(child).map(|handle| ProcessGroup(Inner::Real(handle)))
 }
 
@@ -174,6 +204,59 @@ mod imp {
             unsafe {
                 CloseHandle(self.job);
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Console::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
+
+        /// Reproduces the exact call order the real `engine.rs` spawn site
+        /// uses - `ffmpeg-sidecar`'s `FfmpegCommand::new_with_path` sets
+        /// `CREATE_NO_WINDOW` alone in its own constructor *before* our code
+        /// ever touches the `Command`; `prepare` then runs last, right
+        /// before `spawn()`. `creation_flags` is a plain field set, not an
+        /// OR, so if `prepare` ran first and sidecar's own flag-setting ran
+        /// after (or if some future refactor reordered the real call site
+        /// that way), `CREATE_NEW_PROCESS_GROUP` would be silently dropped.
+        ///
+        /// There's no public Win32 API to read back a running process's
+        /// creation flags, so this checks the flag's actual, documented
+        /// *effect* instead: `GenerateConsoleCtrlEvent` only succeeds when
+        /// targeted at a specific nonzero process-group id if some process
+        /// with that exact id is itself a process-group leader - which only
+        /// happens when `CREATE_NEW_PROCESS_GROUP` actually reached
+        /// `CreateProcess`. If it got clobbered, the child inherits our own
+        /// process group instead and this call fails with
+        /// `ERROR_INVALID_PARAMETER`.
+        #[test]
+        fn create_new_process_group_survives_sidecars_own_flag_set() {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let mut cmd = std::process::Command::new("cmd");
+            cmd.args(["/C", "ping -n 6 127.0.0.1 >NUL"]);
+            // Simulates FfmpegCommand::new_with_path's constructor, which
+            // runs before `prepare` at the real call site in engine.rs.
+            cmd.creation_flags(CREATE_NO_WINDOW);
+
+            prepare(&mut cmd);
+            let mut child = cmd.spawn().expect("spawn under combined creation flags");
+            let pid = child.id();
+
+            let sent = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) };
+
+            // Clean up regardless of the assertion outcome below.
+            let group = adopt(&child).expect("adopt the child we just spawned");
+            group.kill();
+            let _ = child.wait();
+
+            assert_ne!(
+                sent, 0,
+                "CREATE_NEW_PROCESS_GROUP did not survive to spawn() - \
+                 GenerateConsoleCtrlEvent targeting the child's own pid as \
+                 its process group failed, meaning it inherited ours instead"
+            );
         }
     }
 }
