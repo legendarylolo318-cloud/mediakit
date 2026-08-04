@@ -2168,7 +2168,7 @@ dependencies = [
 
 [[package]]
 name = "mediakit"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2193,7 +2193,7 @@ dependencies = [
 
 [[package]]
 name = "mediakit-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "directories",
