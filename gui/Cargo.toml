@@ -1,0 +1,73 @@
+[package]
+name = "mediakit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "MediaKit: native cross-platform media conversion GUI and CLI"
+default-run = "mediakit"
+
+[[bin]]
+name = "mediakit"
+path = "src/main.rs"
+
+[features]
+default = ["bundled"]
+# Forwards to mediakit-core's `bundled` feature (downloads/embeds pinned
+# ffmpeg/ffprobe/yt-dlp at build time). Build with `--no-default-features`
+# for a slim binary that only ever looks at PATH/manual detection - for
+# distro packagers who must not vendor binaries.
+bundled = ["mediakit-core/bundled"]
+
+[dependencies]
+mediakit-core = { path = "../core", default-features = false }
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+directories.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# `wgpu_no_default_features` instead of the plain `wgpu` feature: eframe's
+# default `wgpu` feature turns on egui-wgpu's `default` feature, which pulls
+# in wgpu's `dx12` backend. That backend currently drags in two incompatible
+# `windows-core` versions (via `gpu-allocator 0.28` vs `wgpu-hal`'s own
+# `windows-core` requirement) and fails to compile for any Windows target.
+# Dropping dx12 leaves Vulkan (well-supported on modern Windows) as the
+# native backend there instead.
+eframe = { version = "0.35", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "wayland",
+    "web_screen_reader",
+    "wgpu_no_default_features",
+    "x11",
+] }
+# Explicit, direct dependency so we control which wgpu backends actually get
+# compiled in: everything `wgpu`'s own `default` feature would enable,
+# *except* `dx12` (see the eframe comment above). Cargo unions this feature
+# set with egui-wgpu's own (default-features-off) `wgpu` dependency edge.
+wgpu = { version = "29", default-features = false, features = [
+    "std",
+    "parking_lot",
+    "metal",
+    "gles",
+    "vulkan",
+    "wgsl",
+    "webgpu",
+] }
+egui = "0.35"
+rfd = "0.17"
+clap = { version = "4", features = ["derive"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+arboard = "3.6.1"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Console", "Win32_Storage_FileSystem", "Win32_Foundation"] }
+
+[dev-dependencies]
+tempfile = "3"

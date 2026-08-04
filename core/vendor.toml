@@ -1,0 +1,48 @@
+# Pinned, checksummed static builds that `core`'s build script downloads
+# and bundles into the binary (see build.rs). Every entry is an exact,
+# immutable release asset plus a SHA-256 computed from that exact file -
+# never a "latest"/rolling URL. The build fails loudly if a download's hash
+# doesn't match.
+#
+# ffmpeg builds are GPL (BtbN win64-gpl / johnvansickle amd64 static), which
+# is why they include libx264/libx265. MediaKit's own source stays MIT -
+# see THIRD_PARTY_LICENSES/ and the in-app Licenses dialog for the
+# GPL compliance story (source availability etc.) for the bundled binaries
+# themselves.
+#
+# To update: find the new release, verify its checksum yourself from the
+# publisher's own checksums file (BtbN's `checksums.sha256`, yt-dlp's
+# `SHA2-256SUMS`), and update the corresponding entry below. Never copy a
+# hash from anywhere other than the upstream release's own checksum file.
+
+[ffmpeg.linux-x86_64]
+version = "7.0.2"
+url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+sha256 = "abda8d77ce8309141f83ab8edf0596834087c52467f6badf376a6a2a4c87cf67"
+archive_kind = "tar_xz"
+ffmpeg_path_in_archive = "ffmpeg-7.0.2-amd64-static/ffmpeg"
+ffprobe_path_in_archive = "ffmpeg-7.0.2-amd64-static/ffprobe"
+license = "GPL-3.0-or-later"
+
+[ffmpeg.windows-x86_64]
+version = "8.1.2"
+url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-03-14-02/ffmpeg-n8.1.2-34-g9b6c8969e0-win64-gpl-8.1.zip"
+sha256 = "20b16a056785b232f35363eba81c3fd6113d76ff39e46d98acfaf8440250467f"
+archive_kind = "zip"
+ffmpeg_path_in_archive = "ffmpeg-n8.1.2-34-g9b6c8969e0-win64-gpl-8.1/bin/ffmpeg.exe"
+ffprobe_path_in_archive = "ffmpeg-n8.1.2-34-g9b6c8969e0-win64-gpl-8.1/bin/ffprobe.exe"
+license = "GPL-3.0-or-later"
+
+[ytdlp.linux-x86_64]
+version = "2026.07.04"
+url = "https://github.com/yt-dlp/yt-dlp/releases/download/2026.07.04/yt-dlp_linux"
+sha256 = "6bbb3d314cde4febe36e5fa1d55462e29c974f63444e707871834f6d8cc210ae"
+archive_kind = "raw"
+license = "Unlicense"
+
+[ytdlp.windows-x86_64]
+version = "2026.07.04"
+url = "https://github.com/yt-dlp/yt-dlp/releases/download/2026.07.04/yt-dlp.exe"
+sha256 = "52fe3c26dcf71fbdc85b528589020bb0b8e383155cfa81b64dd447bbe35e24b8"
+archive_kind = "raw"
+license = "Unlicense"

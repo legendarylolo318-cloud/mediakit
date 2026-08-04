@@ -1,0 +1,41 @@
+# Target-size presets for one-click "shrink to fit" conversions.
+#
+# These are plain data, not code, on purpose: Discord alone has changed its
+# free-tier upload cap three times, and MediaKit shouldn't need a new
+# release every time a platform moves the goalposts. Edit this file (or use
+# Settings -> Presets in the app) to add, rename, reorder, or update any
+# entry - no code change or rebuild required. "Restore defaults" in
+# Settings overwrites this file back to exactly what's below.
+#
+# `limit_bytes` is an exact byte count. Written here in MiB (1024*1024)
+# multiples to match what file managers/`du`/most OSes actually report,
+# which is what a user compares the result against - not decimal MB.
+#
+# Caps last verified against each platform's own published limits: 2026-08-03.
+# If a limit changes, edit the matching `limit_bytes` below.
+
+safety_margin_percent = 97.0
+
+[[presets]]
+id = "discord-free"
+display_name = "Discord — Free (10 MB)"
+limit_bytes = 10_485_760
+note = "Discord's free-tier upload cap, verified 2026-08-03."
+
+[[presets]]
+id = "discord-nitro-basic"
+display_name = "Discord — Nitro Basic (50 MB)"
+limit_bytes = 52_428_800
+note = "Discord Nitro Basic's upload cap, verified 2026-08-03."
+
+[[presets]]
+id = "discord-nitro"
+display_name = "Discord — Nitro (500 MB)"
+limit_bytes = 524_288_000
+note = "Discord Nitro's upload cap, verified 2026-08-03."
+
+[[presets]]
+id = "discord-legacy-safe"
+display_name = "Discord — Legacy / safe (8 MB)"
+limit_bytes = 8_388_608
+note = "Discord's older 8 MB cap, kept as a conservative fallback for servers/bots/webhooks that still enforce it."

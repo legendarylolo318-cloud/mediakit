@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+*.pdb
+.DS_Store
+Thumbs.db
+
+# app data written when running locally during development
+/dev-data/
+
+# cached downloads for core's vendored ffmpeg/ffprobe/yt-dlp build.rs
+/core/.vendor-cache/

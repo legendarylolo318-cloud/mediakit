@@ -1,0 +1,223 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Every push/PR builds and tests both variants on both platforms:
+  # `bundled` (default - vendors its own ffmpeg/ffprobe/yt-dlp) and `slim`
+  # (`--no-default-features` - the distro-packager build that only ever
+  # looks at PATH/manual detection). They exercise genuinely different code
+  # paths (see `ffmpeg_env::locate_binary`'s `#[cfg(feature = "bundled")]`
+  # branches), so both need real coverage, not just a compile check.
+  test:
+    name: test (${{ matrix.os }}, ${{ matrix.variant }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        variant: [bundled, slim]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.variant }}
+
+      # Slim builds fall back to PATH for ffmpeg/ffprobe/yt-dlp, so their
+      # test/build steps need a real one available. Bundled builds vendor
+      # their own at build time and never touch PATH, so they don't.
+      - name: Install ffmpeg (Linux, slim variant)
+        if: runner.os == 'Linux' && matrix.variant == 'slim'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install ffmpeg (Windows, slim variant)
+        if: runner.os == 'Windows' && matrix.variant == 'slim'
+        run: choco install ffmpeg -y
+
+      - name: Resolve cargo feature flags for this variant
+        id: features
+        shell: bash
+        run: |
+          if [ "${{ matrix.variant }}" = "slim" ]; then
+            echo "flags=--no-default-features" >> "$GITHUB_OUTPUT"
+          else
+            echo "flags=" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Formatting is variant-independent; only needs to run once.
+      - name: Check formatting
+        if: matrix.os == 'ubuntu-latest' && matrix.variant == 'bundled'
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets ${{ steps.features.outputs.flags }} -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --verbose ${{ steps.features.outputs.flags }}
+
+      - name: Build (release profile)
+        run: cargo build --workspace --release ${{ steps.features.outputs.flags }}
+
+  # Builds the real release artifact (bundled, default features - the one
+  # users actually get) and runs an end-to-end conversion inside a
+  # container that has no ffmpeg of its own, proving the "never requires
+  # the user to install anything" claim rather than just asserting it.
+  smoke-test:
+    name: smoke test (bundled release binary, zero system deps)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: smoke-test
+
+      - name: Build release binary (bundled, default features)
+        run: cargo build --release -p mediakit
+
+      - name: Report binary size
+        run: du -h target/release/mediakit
+
+      # Only the host needs ffmpeg here, to synthesize a test clip - the
+      # container the actual conversion runs in below gets none.
+      - name: Install ffmpeg on the host to generate a test clip
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Generate a tiny test clip
+        run: |
+          set -euo pipefail
+          mkdir -p smoke
+          ffmpeg -y -f lavfi -i "testsrc=duration=2:size=320x240:rate=15" \
+                 -f lavfi -i "sine=frequency=440:duration=2" \
+                 -c:v libx264 -c:a aac -shortest smoke/input.mp4
+
+      - name: Confirm the target container has no ffmpeg of its own
+        run: |
+          set -euo pipefail
+          if docker run --rm ubuntu:24.04 sh -c 'command -v ffmpeg'; then
+            echo "::error::ubuntu:24.04 unexpectedly has ffmpeg - smoke test would not be meaningful"
+            exit 1
+          fi
+
+      - name: Convert the test clip inside that container
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "${{ github.workspace }}/target/release/mediakit:/app/mediakit:ro" \
+            -v "${{ github.workspace }}/smoke:/work" \
+            -w /work \
+            ubuntu:24.04 \
+            /app/mediakit input.mp4 --preset discord-10mb -o output.mp4
+
+      - name: Verify a real output file was produced
+        run: |
+          set -euo pipefail
+          test -s smoke/output.mp4
+          file smoke/output.mp4
+
+  release:
+    name: release artifacts (${{ matrix.os }})
+    needs: [test, smoke-test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: linux-x86_64
+          - os: windows-latest
+            artifact: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release -p mediakit
+
+      - name: Report binary size (Linux)
+        if: runner.os == 'Linux'
+        run: du -h target/release/mediakit
+
+      - name: Report binary size (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: (Get-Item target/release/mediakit.exe).Length / 1MB
+
+      - name: Package tarball (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release/mediakit dist/
+          cp README.md LICENSE dist/
+          tar -C dist -czf "mediakit-${{ matrix.artifact }}.tar.gz" .
+
+      - name: Package portable zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/mediakit.exe dist/
+          Copy-Item README.md dist/
+          Copy-Item LICENSE dist/
+          Compress-Archive -Path dist/* -DestinationPath "mediakit-${{ matrix.artifact }}.zip"
+
+      # Best-effort: AppImage packaging has enough moving parts (FUSE,
+      # bundled shared libs) that we don't want it to block a release if it
+      # breaks. The tarball above is the guaranteed Linux artifact.
+      - name: Build AppImage (Linux, best effort)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y fuse libfuse2
+          curl -L -o linuxdeploy \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy
+
+          mkdir -p AppDir/usr/bin AppDir/usr/share/icons/hicolor/256x256/apps AppDir/usr/share/applications
+          cp target/release/mediakit AppDir/usr/bin/
+          cp gui/assets/icon.png AppDir/usr/share/icons/hicolor/256x256/apps/mediakit.png
+          cp gui/assets/icon.png AppDir/mediakit.png
+          cat > AppDir/usr/share/applications/mediakit.desktop << 'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=MediaKit
+          Exec=mediakit
+          Icon=mediakit
+          Categories=AudioVideo;
+          EOF
+          cp AppDir/usr/share/applications/mediakit.desktop AppDir/
+
+          ./linuxdeploy --appimage-extract-and-run --appdir AppDir --output appimage
+          mv MediaKit*.AppImage "mediakit-x86_64.AppImage"
+
+      - name: Upload release artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            mediakit-*.tar.gz
+            mediakit-*.zip
+            mediakit-*.AppImage
