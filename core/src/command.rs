@@ -235,6 +235,15 @@ pub struct EncodeSettings {
     /// Appended verbatim at the end of the argument list; the manual escape
     /// hatch for the "Advanced" panel's raw ffmpeg args field.
     pub extra_args: Vec<String>,
+    /// Skip MediaKit's compatibility defaults for H.264 MP4 output: forced
+    /// `yuv420p` pixel format (only when `video.pixel_format` wasn't already
+    /// set explicitly) and `-movflags +faststart`. Those two are what keep
+    /// H.264 MP4 files playable in Discord/QuickTime/browsers instead of
+    /// just "plays locally" - on by default, this is the opt-out for
+    /// advanced users who need something else (e.g. a non-4:2:0 pixel
+    /// format, or a streaming target that doesn't want faststart's moov-atom
+    /// relocation).
+    pub disable_compat_defaults: bool,
 }
 
 fn null_output() -> &'static str {
@@ -287,6 +296,11 @@ pub fn build_args(settings: &EncodeSettings, pass: &EncodePass) -> Vec<String> {
 
     let is_first_pass = matches!(pass, EncodePass::First { .. });
 
+    // Set once inside the `Some(video)` arm below (codec is only known
+    // there); read afterwards to decide whether to emit `-movflags
+    // +faststart`, which isn't a per-video-stream flag.
+    let mut compat_defaults_active = false;
+
     match &settings.video {
         None => args.push("-vn".to_string()),
         Some(video) => {
@@ -326,9 +340,17 @@ pub fn build_args(settings: &EncodeSettings, pass: &EncodePass) -> Vec<String> {
                 args.push(video_filter_parts.join(","));
             }
 
-            if let Some(pix_fmt) = &video.pixel_format {
+            compat_defaults_active = !settings.disable_compat_defaults
+                && settings.container == Container::Mp4
+                && video.codec == VideoCodec::H264;
+
+            let effective_pixel_format = video
+                .pixel_format
+                .clone()
+                .or_else(|| compat_defaults_active.then(|| "yuv420p".to_string()));
+            if let Some(pix_fmt) = effective_pixel_format {
                 args.push("-pix_fmt".to_string());
-                args.push(pix_fmt.clone());
+                args.push(pix_fmt);
             }
         }
     }
@@ -375,6 +397,13 @@ pub fn build_args(settings: &EncodeSettings, pass: &EncodePass) -> Vec<String> {
             args.push("-af".to_string());
             args.push(settings.audio_filters.join(","));
         }
+    }
+
+    // Not needed (or meaningful) on the first pass: it targets ffmpeg's null
+    // muxer, not a real MP4 container to relocate the moov atom in.
+    if compat_defaults_active && !is_first_pass {
+        args.push("-movflags".to_string());
+        args.push("+faststart".to_string());
     }
 
     if settings.loop_forever && !is_first_pass {
@@ -598,5 +627,81 @@ mod tests {
         });
         let args = build_args(&settings, &EncodePass::Single);
         assert!(args.contains(&"scale=1280:720".to_string()));
+    }
+
+    #[test]
+    fn h264_mp4_gets_forced_yuv420p_and_faststart_by_default() {
+        let settings = base_settings();
+        let args = build_args(&settings, &EncodePass::Single);
+
+        let pix_idx = args.iter().position(|a| a == "-pix_fmt").unwrap();
+        assert_eq!(args[pix_idx + 1], "yuv420p");
+        let flags_idx = args.iter().position(|a| a == "-movflags").unwrap();
+        assert_eq!(args[flags_idx + 1], "+faststart");
+    }
+
+    #[test]
+    fn disable_compat_defaults_skips_pix_fmt_and_faststart() {
+        let mut settings = base_settings();
+        settings.disable_compat_defaults = true;
+        let args = build_args(&settings, &EncodePass::Single);
+
+        assert!(!args.contains(&"-pix_fmt".to_string()));
+        assert!(!args.contains(&"-movflags".to_string()));
+    }
+
+    #[test]
+    fn explicit_pixel_format_is_respected_over_the_compat_default() {
+        let mut settings = base_settings();
+        settings.video = Some(VideoSettings {
+            pixel_format: Some("yuv444p".to_string()),
+            ..Default::default()
+        });
+        let args = build_args(&settings, &EncodePass::Single);
+
+        let pix_idx = args.iter().position(|a| a == "-pix_fmt").unwrap();
+        assert_eq!(args[pix_idx + 1], "yuv444p");
+        // faststart isn't a pixel-format override, so it still applies.
+        assert!(args.contains(&"-movflags".to_string()));
+    }
+
+    #[test]
+    fn compat_defaults_do_not_apply_to_non_h264_or_non_mp4_output() {
+        let mut settings = base_settings();
+        settings.container = Container::WebM;
+        settings.video = Some(VideoSettings {
+            codec: VideoCodec::Vp9,
+            ..Default::default()
+        });
+        let args = build_args(&settings, &EncodePass::Single);
+        assert!(!args.contains(&"-pix_fmt".to_string()));
+        assert!(!args.contains(&"-movflags".to_string()));
+
+        let mut settings = base_settings();
+        settings.video = Some(VideoSettings {
+            codec: VideoCodec::H265,
+            ..Default::default()
+        });
+        let args = build_args(&settings, &EncodePass::Single);
+        assert!(!args.contains(&"-pix_fmt".to_string()));
+        assert!(!args.contains(&"-movflags".to_string()));
+    }
+
+    #[test]
+    fn faststart_is_omitted_on_the_first_pass_of_a_two_pass_encode() {
+        let mut settings = base_settings();
+        settings.video = Some(VideoSettings {
+            bitrate_kbps: Some(2500),
+            crf: None,
+            ..Default::default()
+        });
+        let pass = EncodePass::First {
+            passlog_prefix: PathBuf::from("/tmp/mediakit_pass"),
+        };
+        let args = build_args(&settings, &pass);
+        assert!(!args.contains(&"-movflags".to_string()));
+        // Compat pixel format still applies on the first pass - it affects
+        // encoder behavior, not just container muxing.
+        assert!(args.contains(&"-pix_fmt".to_string()));
     }
 }

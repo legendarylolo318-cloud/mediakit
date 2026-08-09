@@ -4,6 +4,16 @@ All notable changes to MediaKit are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); versions match the
 tags on the [Releases](../../releases) page.
 
+## [Unreleased]
+
+### Added
+- H.264 MP4 output now gets `-pix_fmt yuv420p` (when a pixel format wasn't
+  already set explicitly) and `-movflags +faststart` forced by default -
+  these are what keep files playable in Discord/QuickTime/browsers instead
+  of just "plays locally on my machine". Opt out via the Advanced panel's
+  "Skip compatibility defaults" checkbox or `--no-compat-defaults` on the
+  CLI (`core/src/command.rs`, `gui/src/encode_config.rs`, `gui/src/cli.rs`).
+
 ## [0.1.1] - 2026-08-04
 
 ### Fixed

@@ -72,6 +72,13 @@ pub struct CliArgs {
     /// Overwrite existing output files instead of auto-numbering.
     #[arg(long, default_value_t = false)]
     pub overwrite: bool,
+
+    /// Skip MediaKit's compatibility defaults for H.264 MP4 output (forced
+    /// `yuv420p` pixel format, `-movflags +faststart`). Those are on by
+    /// default because they're what keeps H.264 MP4 files playable in
+    /// Discord/QuickTime/browsers instead of just "plays locally".
+    #[arg(long, default_value_t = false)]
+    pub no_compat_defaults: bool,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -164,7 +171,7 @@ pub fn run(args: CliArgs) -> i32 {
             .unwrap_or(0.0);
 
         let output = output_settings.resolve(input, preset.output_extension());
-        let (settings, passes, target_size) = match build_settings(
+        let (mut settings, passes, target_size) = match build_settings(
             preset,
             input.clone(),
             output.clone(),
@@ -179,6 +186,7 @@ pub fn run(args: CliArgs) -> i32 {
                 continue;
             }
         };
+        settings.disable_compat_defaults = args.no_compat_defaults;
 
         println!(
             "[{}/{}] {} -> {}",

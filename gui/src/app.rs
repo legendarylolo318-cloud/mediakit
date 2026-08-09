@@ -1515,6 +1515,18 @@ impl MediaKitApp {
                 }
 
                 ui.separator();
+                ui.checkbox(
+                    &mut self.config.disable_compat_defaults,
+                    "Skip compatibility defaults (forced yuv420p + faststart on H.264 MP4)",
+                )
+                .on_hover_text(
+                    "MediaKit forces yuv420p pixel format and -movflags +faststart on H.264 \
+                     MP4 output by default - that's what keeps files playable in Discord, \
+                     QuickTime, and browsers instead of just playing locally. Check this to \
+                     opt out (e.g. if you need a non-4:2:0 pixel format).",
+                );
+
+                ui.separator();
                 ui.label("Custom ffmpeg args (appended verbatim):");
                 ui.text_edit_singleline(&mut self.config.custom_args);
 

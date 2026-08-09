@@ -160,6 +160,11 @@ pub struct EncodeConfig {
     pub custom_args: String,
 
     pub hardware_encoder: Option<String>,
+
+    /// See [`EncodeSettings::disable_compat_defaults`]. Off by default:
+    /// H.264 MP4 output gets forced `yuv420p` + `-movflags +faststart`
+    /// unless the user unchecks this.
+    pub disable_compat_defaults: bool,
 }
 
 impl Default for EncodeConfig {
@@ -204,6 +209,7 @@ impl Default for EncodeConfig {
             speed_factor: 1.0,
             custom_args: String::new(),
             hardware_encoder: None,
+            disable_compat_defaults: false,
         }
     }
 }
@@ -245,6 +251,18 @@ impl EncodeConfig {
             .map(|s| s.to_string())
             .collect();
 
+        let mut job = self.build_for_mode(input, output, duration_seconds, extra_args);
+        job.settings.disable_compat_defaults = self.disable_compat_defaults;
+        job
+    }
+
+    fn build_for_mode(
+        &self,
+        input: PathBuf,
+        output: PathBuf,
+        duration_seconds: f64,
+        extra_args: Vec<String>,
+    ) -> BuiltJob {
         match self.mode {
             Mode::Video => {
                 let mut video = VideoSettings {

@@ -46,6 +46,7 @@ MediaKit only ever shells out to `yt-dlp` — it doesn't implement site-specific
 - Trim start/end, crop
 - Raw ffmpeg args escape hatch
 - Live preview of the exact ffmpeg command that will run, with a "copy command" button
+- **Compatibility defaults**: H.264 MP4 output gets `-pix_fmt yuv420p` (unless a pixel format is already set explicitly) and `-movflags +faststart` forced by default, so files play in Discord/QuickTime/browsers instead of just locally. Opt out via "Skip compatibility defaults" in Advanced, or `--no-compat-defaults` on the CLI.
 
 **Hardware acceleration**
 - Auto-detects NVENC, Quick Sync, VAAPI, AMF, and VideoToolbox encoders your ffmpeg build supports
@@ -134,6 +135,7 @@ mediakit --list-size-presets                                         # show avai
 mediakit --preset video-to-gif clip.mp4
 mediakit --preset image-to-gif photo.png --image-gif-seconds 2
 mediakit --preset extract-audio-mp3 movie.mkv -o audio.mp3
+mediakit --preset target-size --size-preset discord-free input.mp4 -o out.mp4 --no-compat-defaults
 mediakit --help   # full list of presets and flags
 ```
 
