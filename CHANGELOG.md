@@ -7,12 +7,68 @@ tags on the [Releases](../../releases) page.
 ## [Unreleased]
 
 ### Added
+- **YouTube PO-token support**: a new `mediakit_core::pot_provider` module
+  manages a local [bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)
+  HTTP server to work around YouTube's "Sign in to confirm you're not a bot"
+  403s. It starts lazily on 127.0.0.1:4416 (configurable, falls back to a
+  free port if taken) the first time a YouTube/`youtu.be` URL is queued,
+  reuses an already-listening server instead of spawning a second one, polls
+  the port for readiness (20 × 500ms), logs to the app data dir, and is
+  killed on app shutdown (via `procgroup`, so it can't leak an orphan on
+  Windows either). Since upstream publishes no prebuilt standalone server
+  binary (only a tiny yt-dlp plugin zip and a Docker image - verified by
+  hand, not assumed), the pinned plugin and source tarball are downloaded
+  and checksum-verified into the app data dir, and the server is compiled
+  once with the user's own system Node.js/npm (≥ 22, per the pinned
+  version's own `package.json`) rather than mediakit's build. Missing/too-old
+  Node degrades gracefully to a "failed" status with a clear reason, not a
+  hard failure - YouTube downloads still work, just without the extra
+  mitigation. Script mode (`getpot_bgutil_script`) was investigated as a way
+  to avoid the server build entirely; verified against the real plugin
+  (`yt-dlp -v` with plugin dirs pointed at a fresh extraction) that it still
+  needs the exact same compiled output, so HTTP mode (also upstream's own
+  recommendation) is what's used. yt-dlp invocations for YouTube URLs now
+  pass `--plugin-dirs`/`--no-plugin-dirs` (pointed at a mediakit-private
+  directory, never the user's own yt-dlp plugin folders/config/PATH),
+  `--extractor-args "youtube:player_client=mweb"`,
+  `--extractor-args "youtubepot-bgutilhttp:base_url=http://127.0.0.1:<port>"`,
+  and `--js-runtimes node` - all four verified against the real bundled
+  yt-dlp 2026.07.04 binary's `--help` output and a live dry run, not assumed
+  from documentation. A status indicator (stopped/starting/ready/failed)
+  sits next to the ffmpeg status in the top panel, and a Settings toggle
+  (default on) plus port field control it (`core/src/pot_provider.rs`,
+  `core/src/downloader.rs`, `gui/src/app.rs`, `gui/src/settings.rs`).
+- **Convert All**: a queue-wide conversion action, bounded by the existing
+  configurable concurrency limit (default `min(4, cpu cores)`, already
+  non-blocking via `JobEngine`'s worker pool). The button now disables
+  itself when the queue is empty or a batch is already running, tracks the
+  in-flight batch's job ids to show live overall progress in the status bar,
+  and reports a "n succeeded / n failed" summary once every job in the batch
+  reaches a terminal state - per-file failures no longer need a separate
+  mechanism since the engine already isolates them from the rest of the
+  batch, and Cancel All already kills in-flight ffmpeg process trees
+  (`gui/src/app.rs`).
+- A Pink theme, wired into the same `ThemeChoice` enum/switcher and
+  persisted setting as the existing themes - no colors hardcoded at call
+  sites. Dark-first palette (a near-black plum base, hot-pink accent);
+  every text/background pairing checked against WCAG AA by hand (body text
+  on any background layer is ~13-16:1, the accent as link text is ~5.9:1,
+  and the hover/selection shades the shared `themed_visuals` helper derives
+  from it stay at 6.7-8.4:1) (`gui/src/settings.rs`, `gui/src/app.rs`).
 - H.264 MP4 output now gets `-pix_fmt yuv420p` (when a pixel format wasn't
   already set explicitly) and `-movflags +faststart` forced by default -
   these are what keep files playable in Discord/QuickTime/browsers instead
   of just "plays locally on my machine". Opt out via the Advanced panel's
   "Skip compatibility defaults" checkbox or `--no-compat-defaults` on the
   CLI (`core/src/command.rs`, `gui/src/encode_config.rs`, `gui/src/cli.rs`).
+
+### Fixed
+- The pinned BtbN ffmpeg autobuild tag (`autobuild-2026-08-03-14-02`) had
+  been pruned upstream, exactly as `core/vendor.toml`'s own comments warn
+  can happen, breaking every `bundled`-feature build with a 404. Re-pinned
+  to a current autobuild tag at the same ffmpeg 8.1.2 version, with both
+  platforms' checksums re-verified by hand against BtbN's own
+  `checksums.sha256` (`core/vendor.toml`).
 
 ## [0.1.1] - 2026-08-04
 

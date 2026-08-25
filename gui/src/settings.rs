@@ -29,16 +29,18 @@ pub enum ThemeChoice {
     Nord,
     SolarizedDark,
     HighContrast,
+    Pink,
 }
 
 impl ThemeChoice {
-    pub const ALL: [ThemeChoice; 6] = [
+    pub const ALL: [ThemeChoice; 7] = [
         ThemeChoice::System,
         ThemeChoice::Light,
         ThemeChoice::Dark,
         ThemeChoice::Nord,
         ThemeChoice::SolarizedDark,
         ThemeChoice::HighContrast,
+        ThemeChoice::Pink,
     ];
 }
 
@@ -68,6 +70,15 @@ pub struct PersistedSettings {
     /// doesn't nag on every launch, only before the tab is used for the
     /// first time.
     pub download_responsibility_acknowledged: bool,
+
+    /// Whether the YouTube PO-token server (see
+    /// `mediakit_core::pot_provider`) is allowed to start at all. `None`
+    /// means "not set yet" - defaults to enabled, unlike
+    /// `ytdlp_auto_update_enabled` which defaults to off.
+    pub pot_provider_enabled: Option<bool>,
+    /// Port the PO-token server listens on. `None` means "use the default"
+    /// (`mediakit_core::pot_provider::DEFAULT_PORT`).
+    pub pot_provider_port: Option<u16>,
 }
 
 fn settings_path() -> Option<PathBuf> {
@@ -128,6 +139,8 @@ mod tests {
         settings.custom_output_folder = Some(PathBuf::from("/exports"));
         settings.filename_template = Some("{name}.out.{ext}".to_string());
         settings.overwrite_existing = Some(true);
+        settings.pot_provider_enabled = Some(false);
+        settings.pot_provider_port = Some(9999);
 
         save_to_path(&path, &settings);
         let loaded = load_from_path(&path);

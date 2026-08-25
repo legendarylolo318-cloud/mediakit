@@ -31,6 +31,7 @@ Built with Rust + [egui](https://github.com/emilk/egui) for the GUI, and drives 
 - Login-required content: cookies from a browser profile or a `cookies.txt` file — MediaKit never stores credentials and redacts cookie values from any displayed/copied command
 - **Chaining**: "Download → Discord-size clip", "Download → GIF", "Download → MP3" queue as one entry; the intermediate download is cleaned up automatically once the conversion finishes
 - Self-update: check for and install newer `yt-dlp` releases from Settings → Tools (checksum-verified, with one-click rollback), plus an optional weekly auto-check
+- **YouTube PO-token helper** (optional, on by default): runs a local [bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider) server to work around YouTube's "Sign in to confirm you're not a bot" 403s. Starts lazily the first time a YouTube/`youtu.be` URL is queued, with a status indicator (stopped/starting/ready/failed) next to the ffmpeg status and a toggle in Settings. Needs a system Node.js ≥ 22 the first time it's used — if that's missing, YouTube downloads still work, just without this. Never touches your system yt-dlp install, `PATH`, or `~/.config/yt-dlp/`.
 
 MediaKit only ever shells out to `yt-dlp` — it doesn't implement site-specific extraction itself, and it will not attempt to work around DRM. **You're responsible for complying with the terms of service and copyright law of whatever site or content you download from.**
 
@@ -38,7 +39,8 @@ MediaKit only ever shells out to `yt-dlp` — it doesn't implement site-specific
 - Drag & drop or file-picker input, multi-file selection
 - Per-item status (queued / running / done / failed / cancelled), reorder, remove, clear
 - Real percentage + ETA progress per job, parsed from ffmpeg's machine-readable progress stream
-- Configurable concurrency; cancel individual jobs or the whole queue
+- **Convert All**: runs the current conversion settings against every convertible file in the queue at once, bounded by the same configurable concurrency limit (default `min(4, cpu cores)`); per-file and overall progress, a "n succeeded / n failed" summary when the batch finishes, and per-file errors that don't abort the rest of the batch
+- Configurable concurrency; cancel individual jobs or the whole queue (kills in-flight ffmpeg processes, not just marks them cancelled)
 - Size-targeted jobs get a real pass/fail badge with the actual output byte count once they finish, not just "done"
 
 **Advanced panel**
@@ -54,7 +56,7 @@ MediaKit only ever shells out to `yt-dlp` — it doesn't implement site-specific
 
 **Everything else**
 - ffmpeg/ffprobe/yt-dlp bundled and extracted automatically on first launch — no install, no PATH setup, no admin/root
-- Six themes (System/Light/Dark plus Nord, Solarized Dark, and High Contrast), roomier rounded buttons
+- Seven themes (System/Light/Dark plus Nord, Solarized Dark, High Contrast, and Pink), roomier rounded buttons
 - Settings, window state, and target-size presets persisted per-OS
 - Per-job ffmpeg/yt-dlp logs, viewable in-app, for debugging failures
 - Headless CLI mode for scripting: `mediakit --preset target-size --size-preset discord-free input.mp4 -o out.mp4`
@@ -144,7 +146,7 @@ The Download tab is GUI-only for now; the CLI covers local file conversion.
 ## FAQ
 
 **Does this upload my files anywhere?**
-No. Everything runs locally via local `ffmpeg`/`yt-dlp` subprocesses. The only network access MediaKit ever makes is: fetching a URL you explicitly paste into the Download tab, an optional yt-dlp self-update check, and (only in `slim` builds without a bundled ffmpeg) an opt-in one-time ffmpeg download.
+No. Everything runs locally via local `ffmpeg`/`yt-dlp` subprocesses. The only network access MediaKit ever makes is: fetching a URL you explicitly paste into the Download tab, an optional yt-dlp self-update check, the (optional, on by default) one-time download+build of the local YouTube PO-token helper the first time a YouTube URL is queued, and (only in `slim` builds without a bundled ffmpeg) an opt-in one-time ffmpeg download.
 
 **Do I need to install ffmpeg or yt-dlp myself?**
 No, not with the default build — both are bundled and extracted automatically. See [Slim builds](#slim-builds---no-default-features) if you specifically want MediaKit to use your own install instead.

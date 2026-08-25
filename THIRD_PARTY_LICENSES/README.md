@@ -2,8 +2,9 @@
 
 MediaKit's own source code is MIT-licensed (see the top-level `LICENSE`
 file). It bundles pre-built binaries of two other projects so users never
-have to install anything themselves; those binaries carry their own
-licenses, reproduced here.
+have to install anything themselves, and optionally downloads/builds a
+third (the YouTube PO-token provider) the first time it's actually needed;
+those projects' binaries/source carry their own licenses, reproduced here.
 
 ## ffmpeg / ffprobe — GPL-3.0-or-later
 
@@ -43,6 +44,35 @@ no restrictions or attribution requirements on MediaKit; the license text is
 included here for completeness. Source: <https://github.com/yt-dlp/yt-dlp>.
 
 Full license text: [`yt-dlp-Unlicense.txt`](./yt-dlp-Unlicense.txt)
+
+## bgutil-ytdlp-pot-provider — GPL-3.0-only
+
+MediaKit can optionally run a local [bgutil-ytdlp-pot-provider] server to
+give yt-dlp a proof-of-origin token for YouTube, working around
+bot-detection 403s (see `mediakit_core::pot_provider`). Unlike ffmpeg/yt-dlp,
+this is **not** embedded in the MediaKit binary at build time - upstream
+publishes only a tiny yt-dlp plugin and a Docker image, no standalone
+prebuilt server binary. Instead, the pinned yt-dlp plugin zip and a pinned
+source tarball are downloaded (checksum-verified) into MediaKit's own app
+data directory the first time a YouTube URL is queued, compiled once with
+the user's own system Node.js/npm, and run there. The pinned version and
+both checksums are recorded as constants at the top of
+[`core/src/pot_provider.rs`](../core/src/pot_provider.rs).
+
+As with ffmpeg, MediaKit only ever launches this as a separate subprocess
+(a local HTTP server on `127.0.0.1`) - it never links against its code, so
+this stays mere aggregation and MediaKit's own source stays MIT. The
+downloaded source is unmodified and redistributed under its own terms
+(GPL-3.0-only); it is never installed into any of yt-dlp's own default
+plugin locations, `PATH`, or config. Source:
+<https://github.com/Brainicism/bgutil-ytdlp-pot-provider>.
+
+Full license text: [`bgutil-ytdlp-pot-provider-GPL-3.0.txt`](./bgutil-ytdlp-pot-provider-GPL-3.0.txt)
+
+This feature can be turned off entirely in Settings, in which case nothing
+under this heading is ever downloaded.
+
+[bgutil-ytdlp-pot-provider]: https://github.com/Brainicism/bgutil-ytdlp-pot-provider
 
 ## Slim builds
 

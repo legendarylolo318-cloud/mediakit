@@ -287,6 +287,12 @@ pub struct DownloadOptions {
     pub cookies: Option<CookieSource>,
     /// yt-dlp output filename template, e.g. `"%(title)s.%(ext)s"`.
     pub output_template: String,
+    /// Extra yt-dlp arguments MediaKit itself injects rather than the user
+    /// (currently: [`crate::pot_provider::youtube_extra_args`] for YouTube
+    /// URLs). Inserted right after the fixed base args in
+    /// [`build_download_args`], before format/quality flags, so it never
+    /// disturbs the merge/format logic there.
+    pub extra_args: Vec<String>,
 }
 
 impl Default for DownloadOptions {
@@ -300,6 +306,7 @@ impl Default for DownloadOptions {
             concurrent_fragments: None,
             cookies: None,
             output_template: "%(title)s.%(ext)s".to_string(),
+            extra_args: Vec::new(),
         }
     }
 }
@@ -336,6 +343,7 @@ pub fn build_download_args(
         "--print".to_string(),
         format!("after_move:{FINAL_PATH_MARKER}%(filepath)s"),
     ];
+    args.extend(options.extra_args.iter().cloned());
 
     match format {
         FormatSelection::AudioOnlyMp3 => {
@@ -622,6 +630,19 @@ mod tests {
         );
         assert!(!redacted.contains(&"firefox:default-release".to_string()));
         assert!(redacted.contains(&"<redacted>".to_string()));
+    }
+
+    #[test]
+    fn extra_args_are_inserted_before_format_flags() {
+        let options = DownloadOptions {
+            extra_args: vec!["--js-runtimes".to_string(), "node".to_string()],
+            ..Default::default()
+        };
+        let args = build_download_args("url", &FormatSelection::Best, Path::new("/bin"), &options);
+        let extra_idx = args.iter().position(|a| a == "--js-runtimes").unwrap();
+        let format_idx = args.iter().position(|a| a == "-f").unwrap();
+        assert!(extra_idx < format_idx);
+        assert_eq!(args[extra_idx + 1], "node");
     }
 
     #[test]

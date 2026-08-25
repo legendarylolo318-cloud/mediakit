@@ -7,6 +7,7 @@ pub mod error;
 pub mod ffmpeg_env;
 pub mod hwaccel;
 pub mod job;
+pub mod pot_provider;
 pub mod presets;
 pub mod probe;
 pub mod procgroup;

@@ -216,6 +216,18 @@ pub struct MediaKitApp {
     /// Whether the user has dismissed the Download tab's one-time
     /// ToS/copyright responsibility notice - see `download_responsibility_notice`.
     download_responsibility_acknowledged: bool,
+
+    pot_manager: mediakit_core::pot_provider::PotProviderManager,
+    pot_config: mediakit_core::pot_provider::PotProviderConfig,
+
+    /// Job ids submitted by the last "Convert All" click, still tracked
+    /// until every one of them reaches a terminal state - see
+    /// `convert_all` and `poll_batch_completion`. Empty when no batch is
+    /// in flight.
+    batch_ids: std::collections::HashSet<JobId>,
+    /// "n succeeded / n failed" for the most recently finished "Convert
+    /// All" batch, shown in the status bar until the next one starts.
+    batch_summary: Option<String>,
 }
 
 impl MediaKitApp {
@@ -353,6 +365,17 @@ impl MediaKitApp {
             new_preset_mib: 10,
 
             download_responsibility_acknowledged: persisted.download_responsibility_acknowledged,
+
+            pot_manager: mediakit_core::pot_provider::PotProviderManager::new(),
+            pot_config: mediakit_core::pot_provider::PotProviderConfig {
+                enabled: persisted.pot_provider_enabled.unwrap_or(true),
+                port: persisted
+                    .pot_provider_port
+                    .unwrap_or(mediakit_core::pot_provider::DEFAULT_PORT),
+            },
+
+            batch_ids: std::collections::HashSet::new(),
+            batch_summary: None,
         }
     }
 
@@ -376,6 +399,8 @@ impl MediaKitApp {
             ytdlp_auto_update_enabled: self.ytdlp_auto_update_enabled,
             download_responsibility_acknowledged: self.download_responsibility_acknowledged,
             download_output_dir: Some(self.download_output_dir.clone()),
+            pot_provider_enabled: Some(self.pot_config.enabled),
+            pot_provider_port: Some(self.pot_config.port),
         }
     }
 
@@ -393,7 +418,7 @@ impl MediaKitApp {
                 self.add_files(paths);
             }
         }
-        if convert_all {
+        if convert_all && !self.items.is_empty() && !self.jobs_active() {
             self.convert_all();
         }
         if cancel_all {
@@ -498,15 +523,58 @@ impl MediaKitApp {
         });
     }
 
+    /// Runs the current conversion settings against every convertible file
+    /// in the queue. Submission itself is instant (each item just gets
+    /// pushed onto `JobEngine`'s queue); the engine's own worker pool - sized
+    /// by `self.concurrency` - is what actually bounds how many run at once
+    /// and keeps this off the UI thread. `batch_ids` is how
+    /// `poll_batch_completion` later knows when to report a summary.
     fn convert_all(&mut self) {
+        self.batch_summary = None;
+        self.batch_ids.clear();
         for idx in 0..self.items.len() {
             if matches!(
                 self.items[idx].status,
                 QueueStatus::NotQueued | QueueStatus::Failed(_) | QueueStatus::Cancelled
             ) {
+                self.batch_ids.insert(self.items[idx].id);
                 self.submit_item(idx);
             }
         }
+    }
+
+    /// Once every job in the in-flight "Convert All" batch has reached a
+    /// terminal state, compute and store a "n succeeded / n failed" summary
+    /// and clear the batch. A no-op while any batch member is still
+    /// queued/running, and when there's no batch in flight at all.
+    fn poll_batch_completion(&mut self) {
+        if self.batch_ids.is_empty() {
+            return;
+        }
+        let still_running = self.items.iter().any(|i| {
+            self.batch_ids.contains(&i.id)
+                && matches!(i.status, QueueStatus::Queued | QueueStatus::Running)
+        });
+        if still_running {
+            return;
+        }
+
+        let mut succeeded = 0;
+        let mut failed = 0;
+        for item in &self.items {
+            if !self.batch_ids.contains(&item.id) {
+                continue;
+            }
+            match item.status {
+                QueueStatus::Done => succeeded += 1,
+                QueueStatus::Failed(_) | QueueStatus::Cancelled => failed += 1,
+                _ => {}
+            }
+        }
+        self.batch_summary = Some(format!(
+            "Convert All finished: {succeeded} succeeded, {failed} failed"
+        ));
+        self.batch_ids.clear();
     }
 
     fn cancel_all(&mut self) {
@@ -816,6 +884,37 @@ impl MediaKitApp {
             concurrent_fragments: self.download_concurrent_fragments.trim().parse().ok(),
             cookies: self.current_cookie_source(),
             output_template,
+            extra_args: Vec::new(),
+        }
+    }
+
+    /// Lazily start the PO-token server the first time a YouTube URL is
+    /// queued (idempotent - later calls while it's already
+    /// starting/running are a no-op), and return the extra yt-dlp args to
+    /// route this download through it. Returns an empty list for
+    /// non-YouTube URLs, when the toggle is off, or when the server isn't
+    /// `Ready` *yet* - a download queued while it's still starting up
+    /// simply proceeds without PO-token help this one time rather than
+    /// blocking the GUI thread waiting for it; the server stays warm for
+    /// every download after.
+    fn youtube_pot_args_for(&self, url: &str) -> Vec<String> {
+        if !mediakit_core::pot_provider::is_youtube_url(url) {
+            return Vec::new();
+        }
+        let Ok(app_data_dir) = ffmpeg_env::app_data_dir() else {
+            return Vec::new();
+        };
+        self.pot_manager.ensure_started(
+            self.pot_config,
+            app_data_dir.clone(),
+            app_data_dir.clone(),
+        );
+        match self.pot_manager.port() {
+            Some(port) => mediakit_core::pot_provider::youtube_extra_args(
+                port,
+                &mediakit_core::pot_provider::plugin_dir(&app_data_dir),
+            ),
+            None => Vec::new(),
         }
     }
 
@@ -827,7 +926,8 @@ impl MediaKitApp {
         self.next_id += 1;
 
         let format = self.download_format.resolve(&self.download_custom_format);
-        let options = self.current_download_options();
+        let mut options = self.current_download_options();
+        options.extra_args = self.youtube_pot_args_for(&url);
         let ffmpeg_dir = match &self.ffmpeg_status {
             FfmpegStatus::Ready(env) => env
                 .ffmpeg_path
@@ -1344,8 +1444,9 @@ impl MediaKitApp {
                     self.items.clear();
                 }
                 ui.separator();
+                let convert_all_enabled = !self.items.is_empty() && !self.jobs_active();
                 if ui
-                    .button("Convert All")
+                    .add_enabled(convert_all_enabled, egui::Button::new("Convert All"))
                     .on_hover_text("Ctrl+Enter")
                     .clicked()
                 {
@@ -1368,6 +1469,9 @@ impl MediaKitApp {
                             "ffmpeg not found (checked app data dir, next to exe, and PATH)",
                         );
                     }
+                }
+                if self.pot_config.enabled {
+                    self.pot_status_indicator(ui);
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1398,6 +1502,39 @@ impl MediaKitApp {
         });
     }
 
+    /// Small "PO-token server: stopped/starting/ready/failed" indicator,
+    /// hidden entirely when the feature is disabled in Settings. Purely
+    /// informational - the server itself only ever starts lazily, the
+    /// first time a YouTube URL is queued (see `youtube_pot_args_for`).
+    fn pot_status_indicator(&self, ui: &mut egui::Ui) {
+        use mediakit_core::pot_provider::PotProviderState;
+        ui.separator();
+        match self.pot_manager.state() {
+            PotProviderState::Stopped => {
+                ui.label("PO-token server: stopped");
+            }
+            PotProviderState::Starting => {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 180, 80),
+                    "PO-token server: starting\u{2026}",
+                );
+            }
+            PotProviderState::Ready { port } => {
+                ui.colored_label(
+                    egui::Color32::from_rgb(80, 180, 100),
+                    format!("PO-token server: ready ({port})"),
+                );
+            }
+            PotProviderState::Failed(reason) => {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 90, 90),
+                    "PO-token server: failed",
+                )
+                .on_hover_text(reason);
+            }
+        }
+    }
+
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::bottom("status_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1425,6 +1562,26 @@ impl MediaKitApp {
                     "{} items - {queued} queued, {running} running, {done} done, {failed} failed",
                     self.items.len()
                 ));
+
+                if !self.batch_ids.is_empty() {
+                    let batch_total = self.batch_ids.len();
+                    let batch_done = self
+                        .items
+                        .iter()
+                        .filter(|i| {
+                            self.batch_ids.contains(&i.id)
+                                && !matches!(i.status, QueueStatus::Queued | QueueStatus::Running)
+                        })
+                        .count();
+                    ui.separator();
+                    ui.add(
+                        egui::ProgressBar::new(batch_done as f32 / batch_total as f32)
+                            .text(format!("Convert All: {batch_done}/{batch_total}")),
+                    );
+                } else if let Some(summary) = &self.batch_summary {
+                    ui.separator();
+                    ui.label(summary);
+                }
             });
         });
     }
@@ -1959,6 +2116,25 @@ impl MediaKitApp {
             ui.label("Concurrent jobs:");
             ui.add(egui::DragValue::new(&mut self.concurrency).range(1..=16))
                 .on_hover_text("Applies the next time MediaKit starts");
+
+            ui.separator();
+            ui.checkbox(
+                &mut self.pot_config.enabled,
+                "Enable YouTube PO-token server",
+            )
+            .on_hover_text(
+                "Runs a small local helper (bundled from bgutil-ytdlp-pot-provider) that gives \
+                 yt-dlp a proof-of-origin token for YouTube, working around 'Sign in to confirm \
+                 you're not a bot' 403s. Needs Node.js >= 22 on PATH the first time it's used - \
+                 if that's missing, YouTube downloads still work, just without this. Starts \
+                 lazily on the first YouTube URL, never touches your system yt-dlp/PATH/config.",
+            );
+            if self.pot_config.enabled {
+                ui.horizontal(|ui| {
+                    ui.label("Port:");
+                    ui.add(egui::DragValue::new(&mut self.pot_config.port).range(1..=65535));
+                });
+            }
         });
     }
 
@@ -2210,8 +2386,10 @@ impl MediaKitApp {
                         "MediaKit's own source is MIT-licensed. It bundles pre-built \
                          ffmpeg/ffprobe (GPL, for full libx264/libx265 quality) and \
                          yt-dlp (public domain) so nothing needs to be installed \
-                         separately. Full texts and where to get each project's \
-                         source are in THIRD_PARTY_LICENSES/ next to the app.",
+                         separately, and can optionally download/build a YouTube \
+                         PO-token helper (GPL) on first use. Full texts and where to \
+                         get each project's source are in THIRD_PARTY_LICENSES/ next \
+                         to the app.",
                     );
                     ui.separator();
 
@@ -2234,6 +2412,13 @@ impl MediaKitApp {
                         ui,
                         "yt-dlp - Unlicense",
                         include_str!("../../THIRD_PARTY_LICENSES/yt-dlp-Unlicense.txt"),
+                    );
+                    license_section(
+                        ui,
+                        "bgutil-ytdlp-pot-provider (optional, downloaded on first use) - GPL-3.0-only",
+                        include_str!(
+                            "../../THIRD_PARTY_LICENSES/bgutil-ytdlp-pot-provider-GPL-3.0.txt"
+                        ),
                     );
                 });
             });
@@ -2714,6 +2899,7 @@ fn theme_label(theme: ThemeChoice) -> &'static str {
         ThemeChoice::Nord => "Nord",
         ThemeChoice::SolarizedDark => "Solarized Dark",
         ThemeChoice::HighContrast => "High Contrast",
+        ThemeChoice::Pink => "Pink",
     }
 }
 
@@ -2830,6 +3016,23 @@ fn high_contrast_visuals() -> egui::Visuals {
     )
 }
 
+/// Dark-first pink palette: a near-black plum base (never pure black, so
+/// panels/cards still read as distinct layers) with a hot-pink accent.
+/// Every pairing below was checked against WCAG AA (4.5:1 for text, 3:1 for
+/// large/UI elements): body text on any of the three background layers is
+/// ~13-16:1, the accent used as hyperlink/link text on `base_bg` is ~5.9:1,
+/// and the darkened accent shades `themed_visuals` derives for
+/// hover/selection fills stay at 6.7-8.4:1 against `text`.
+fn pink_visuals() -> egui::Visuals {
+    themed_visuals(
+        egui::Color32::from_rgb(0x1F, 0x14, 0x20),
+        egui::Color32::from_rgb(0x2B, 0x1B, 0x2E),
+        egui::Color32::from_rgb(0x15, 0x0E, 0x17),
+        egui::Color32::from_rgb(0xF6, 0xE6, 0xF2),
+        egui::Color32::from_rgb(0xFF, 0x4F, 0xA3),
+    )
+}
+
 fn apply_theme(ctx: &egui::Context, theme: ThemeChoice) {
     match theme {
         ThemeChoice::System => ctx.set_theme(egui::ThemePreference::System),
@@ -2850,6 +3053,10 @@ fn apply_theme(ctx: &egui::Context, theme: ThemeChoice) {
         ThemeChoice::HighContrast => {
             ctx.set_theme(egui::ThemePreference::Dark);
             ctx.set_visuals(high_contrast_visuals());
+        }
+        ThemeChoice::Pink => {
+            ctx.set_theme(egui::ThemePreference::Dark);
+            ctx.set_visuals(pink_visuals());
         }
     }
     apply_button_style(ctx);
@@ -2879,6 +3086,7 @@ impl eframe::App for MediaKitApp {
         let ctx = ui.ctx().clone();
         self.poll_probe_results();
         self.poll_engine_events();
+        self.poll_batch_completion();
         self.poll_metadata();
         self.poll_download_events();
         self.poll_update_events();
@@ -2898,16 +3106,19 @@ impl eframe::App for MediaKitApp {
         self.presets_editor_window(&ctx);
         self.download_log_window(&ctx);
 
-        let still_working =
-            self.items.iter().any(|i| {
-                i.probing || matches!(i.status, QueueStatus::Queued | QueueStatus::Running)
-            }) || self.download_jobs_active();
+        let still_working = self
+            .items
+            .iter()
+            .any(|i| i.probing || matches!(i.status, QueueStatus::Queued | QueueStatus::Running))
+            || self.download_jobs_active()
+            || self.pot_manager.state() == mediakit_core::pot_provider::PotProviderState::Starting;
         if still_working {
             ctx.request_repaint();
         }
     }
 
     fn on_exit(&mut self) {
+        self.pot_manager.shutdown();
         crate::settings::save(&self.persisted_settings());
     }
 }

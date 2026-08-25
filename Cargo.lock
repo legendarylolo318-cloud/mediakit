@@ -2198,6 +2198,7 @@ dependencies = [
  "anyhow",
  "directories",
  "ffmpeg-sidecar",
+ "flate2",
  "libc",
  "serde",
  "serde_json",
