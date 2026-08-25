@@ -67,6 +67,17 @@ pub struct DownloadEngine {
     workers: Vec<std::thread::JoinHandle<()>>,
 }
 
+#[derive(Clone)]
+pub struct DownloadSubmitHandle(Arc<Shared>);
+
+impl DownloadSubmitHandle {
+    pub fn submit(&self, spec: DownloadSpec) {
+        let mut queue = self.0.queue.lock().unwrap();
+        queue.push_back(spec);
+        self.0.condvar.notify_one();
+    }
+}
+
 impl DownloadEngine {
     pub fn new(ytdlp_path: PathBuf, concurrency: usize) -> (Self, Receiver<DownloadEvent>) {
         let (tx, rx) = mpsc::channel();
@@ -91,9 +102,17 @@ impl DownloadEngine {
     }
 
     pub fn submit(&self, spec: DownloadSpec) {
-        let mut queue = self.shared.queue.lock().unwrap();
-        queue.push_back(spec);
-        self.shared.condvar.notify_one();
+        self.handle().submit(spec);
+    }
+
+    /// A cheap, `Clone`-able handle that can submit jobs from a detached
+    /// background thread (e.g. one waiting on
+    /// [`crate::pot_provider::PotProviderManager`] to become ready before
+    /// building a YouTube job's args) without needing a borrow of the
+    /// engine itself, which a GUI holding it behind `Option<DownloadEngine>`
+    /// can't hand out across threads.
+    pub fn handle(&self) -> DownloadSubmitHandle {
+        DownloadSubmitHandle(Arc::clone(&self.shared))
     }
 
     pub fn cancel(&self, id: JobId) {

@@ -38,6 +38,10 @@ tags on the [Releases](../../releases) page.
   sits next to the ffmpeg status in the top panel, and a Settings toggle
   (default on) plus port field control it (`core/src/pot_provider.rs`,
   `core/src/downloader.rs`, `gui/src/app.rs`, `gui/src/settings.rs`).
+  Verified end-to-end against a real YouTube video (real `npm ci`/`tsc`
+  build, real server, real PO token retrieved and used by a real merged
+  download) both standalone and through the fixed `queue_download` path
+  below.
 - **Convert All**: a queue-wide conversion action, bounded by the existing
   configurable concurrency limit (default `min(4, cpu cores)`, already
   non-blocking via `JobEngine`'s worker pool). The button now disables
@@ -63,6 +67,21 @@ tags on the [Releases](../../releases) page.
   CLI (`core/src/command.rs`, `gui/src/encode_config.rs`, `gui/src/cli.rs`).
 
 ### Fixed
+- The PO-token server never actually protected the download that started
+  it: `queue_download` called `PotProviderManager::ensure_started` (which
+  kicks off setup on a background thread and returns immediately) and then
+  read `pot_manager.port()` in the same call, which is essentially always
+  `None` since setup takes several seconds minimum - so the very YouTube
+  download that triggered the server's first-ever start always got
+  submitted with empty `extra_args`, silently falling back to the
+  no-PO-token behavior it was meant to fix. Fixed by deferring the actual
+  `engine.submit()` for a YouTube URL to a background thread that starts
+  the server and *waits* for it (up to 90s) before submitting, via a new
+  `DownloadEngine::handle()`/`DownloadSubmitHandle` that can be handed to a
+  thread the GUI doesn't own - never blocks the UI thread either way
+  (`core/src/download_engine.rs`, `gui/src/app.rs`). Reproduced the race
+  and confirmed the fix with a real cold-start download against a real
+  YouTube video.
 - The pinned BtbN ffmpeg autobuild tag (`autobuild-2026-08-03-14-02`) had
   been pruned upstream, exactly as `core/vendor.toml`'s own comments warn
   can happen, breaking every `bundled`-feature build with a 404. Re-pinned
