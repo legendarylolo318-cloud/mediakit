@@ -6,6 +6,8 @@ tags on the [Releases](../../releases) page.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-25
+
 ### Added
 - **YouTube PO-token support**: a new `mediakit_core::pot_provider` module
   manages a local [bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)
