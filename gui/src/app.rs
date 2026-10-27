@@ -7,6 +7,7 @@ use crate::output::{OutputLocation, OutputSettings};
 use crate::probe_worker::ProbeWorker;
 use crate::queue::{QueueItem, QueueStatus};
 use crate::settings::{PersistedSettings, ThemeChoice};
+use crate::status::{self, Health, StatusInputs};
 use crate::sys;
 use crate::update_worker::{UpdateOutcome, UpdateWorker};
 use eframe::egui;
@@ -236,6 +237,8 @@ pub struct MediaKitApp {
 
 impl MediaKitApp {
     pub fn new(cc: &eframe::CreationContext<'_>, persisted: PersistedSettings) -> Self {
+        // Probe for Node off the UI thread so the status dot can read it.
+        std::thread::spawn(mediakit_core::pot_provider::node_available_cached);
         let overrides = mediakit_core::ffmpeg_env::ToolOverrides {
             ffmpeg: persisted.override_ffmpeg_path.clone(),
             ffprobe: persisted.override_ffprobe_path.clone(),
@@ -1547,24 +1550,6 @@ impl MediaKitApp {
                 {
                     self.convert_all();
                 }
-                ui.separator();
-                match &self.ffmpeg_status {
-                    FfmpegStatus::Ready(env) => {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(80, 180, 100),
-                            format!("ffmpeg {}", env.version),
-                        );
-                    }
-                    FfmpegStatus::NotFound => {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(220, 90, 90),
-                            "ffmpeg not found (checked app data dir, next to exe, and PATH)",
-                        );
-                    }
-                }
-                if self.pot_config.enabled {
-                    self.pot_status_indicator(ui);
-                }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let can_cancel = self.jobs_active();
@@ -1605,36 +1590,66 @@ impl MediaKitApp {
         });
     }
 
-    /// Small "PO-token server: stopped/starting/ready/failed" indicator,
-    /// hidden entirely when the feature is disabled in Settings. Purely
-    /// informational - the server itself only ever starts lazily, the
-    /// first time a YouTube URL is queued (see `youtube_pot_args_for`).
-    fn pot_status_indicator(&self, ui: &mut egui::Ui) {
-        use mediakit_core::pot_provider::PotProviderState;
-        ui.separator();
-        match self.pot_manager.state() {
-            PotProviderState::Stopped => {
-                ui.label("PO-token server: stopped");
+    fn status_inputs(&self) -> StatusInputs {
+        let (ffmpeg_version, ytdlp_version) = match &self.ffmpeg_status {
+            FfmpegStatus::Ready(env) => (Some(env.version.clone()), env.ytdlp_version.clone()),
+            FfmpegStatus::NotFound => (None, None),
+        };
+        StatusInputs {
+            ffmpeg_version,
+            ytdlp_version,
+            node_available: mediakit_core::pot_provider::node_available_if_known(),
+            pot_enabled: self.pot_config.enabled,
+            pot_state: self.pot_manager.state(),
+        }
+    }
+
+    /// The one status dot: colour from [`status::health`], tooltip listing
+    /// every component, click for a popup with the same details plus the
+    /// relevant actions.
+    fn status_dot(&mut self, ui: &mut egui::Ui) {
+        let inputs = self.status_inputs();
+        let health = status::health(&inputs);
+        let color = match health {
+            Health::Green => egui::Color32::from_rgb(80, 180, 100),
+            Health::Yellow => egui::Color32::from_rgb(220, 180, 80),
+            Health::Red => egui::Color32::from_rgb(220, 90, 90),
+            Health::Grey => egui::Color32::GRAY,
+        };
+        let components = status::components(&inputs);
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+        ui.painter().circle_filled(rect.center(), 6.0, color);
+        let response = response.on_hover_ui(|ui| {
+            for c in &components {
+                ui.label(format!("{}: {}", c.name, c.detail));
             }
-            PotProviderState::Starting => {
-                ui.colored_label(
-                    egui::Color32::from_rgb(220, 180, 80),
-                    "PO-token server: starting\u{2026}",
-                );
+        });
+        let mut restart = false;
+        let mut open_settings = false;
+        egui::Popup::menu(&response).show(|ui| {
+            ui.set_min_width(260.0);
+            for c in &components {
+                ui.label(format!("{}: {}", c.name, c.detail));
             }
-            PotProviderState::Ready { port } => {
-                ui.colored_label(
-                    egui::Color32::from_rgb(80, 180, 100),
-                    format!("PO-token server: ready ({port})"),
-                );
+            ui.separator();
+            if self.pot_config.enabled && ui.button("Restart PO-token server").clicked() {
+                restart = true;
+                ui.close();
             }
-            PotProviderState::Failed(reason) => {
-                ui.colored_label(
-                    egui::Color32::from_rgb(220, 90, 90),
-                    "PO-token server: failed",
-                )
-                .on_hover_text(reason);
+            if ui.button("Open Settings \u{2192} Tools").clicked() {
+                open_settings = true;
+                ui.close();
             }
+        });
+        if restart {
+            self.pot_manager.shutdown();
+            if let Ok(dir) = ffmpeg_env::app_data_dir() {
+                self.pot_manager
+                    .ensure_started(self.pot_config, dir.clone(), dir);
+            }
+        }
+        if open_settings {
+            self.show_settings = true;
         }
     }
 
@@ -1685,6 +1700,9 @@ impl MediaKitApp {
                     ui.separator();
                     ui.label(summary);
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.status_dot(ui);
+                });
             });
         });
     }

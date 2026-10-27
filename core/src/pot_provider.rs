@@ -262,12 +262,20 @@ pub fn youtube_extra_args(node_available: bool, pot: Option<(u16, &Path)>) -> Ve
     args
 }
 
+static NODE_MAJOR: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+
 /// Cached [`detect_node_major_version`] - Node doesn't appear or vanish
 /// mid-session in practice, and this is consulted on every YouTube call, so
 /// don't spawn `node --version` each time.
 pub fn node_available_cached() -> bool {
-    static NODE: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
-    NODE.get_or_init(detect_node_major_version).is_some()
+    NODE_MAJOR.get_or_init(detect_node_major_version).is_some()
+}
+
+/// The cached Node result if it has already been probed, without probing -
+/// for the UI thread, which must not spawn a process. Pair with a startup
+/// call to [`node_available_cached`] on a background thread.
+pub fn node_available_if_known() -> Option<bool> {
+    NODE_MAJOR.get().map(Option::is_some)
 }
 
 /// Blocking: build the yt-dlp extra args for `url`. Non-YouTube URLs get

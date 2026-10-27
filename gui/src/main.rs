@@ -13,6 +13,7 @@ mod output;
 mod probe_worker;
 mod queue;
 mod settings;
+mod status;
 mod sys;
 mod update_worker;
 
