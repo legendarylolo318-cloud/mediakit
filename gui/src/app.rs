@@ -4,6 +4,7 @@ use crate::encode_config::{EncodeConfig, Mode, TargetSizeChoice};
 use crate::error_hint::{self, FixAction};
 use crate::format;
 use crate::metadata_worker::MetadataWorker;
+use crate::notify;
 use crate::output::{OutputLocation, OutputSettings};
 use crate::paste::{self, Paste};
 use crate::preset_cards::Card;
@@ -191,6 +192,15 @@ pub struct MediaKitApp {
     open_download_options: bool,
     download_filename_template: String,
     advanced_open: bool,
+    notifications_enabled: bool,
+    // Per-run tallies driving the finish notification (see
+    // `notify_when_idle`): jobs finished since the queue last went idle.
+    convert_was_active: bool,
+    convert_run: (usize, usize, Option<String>),
+    download_was_active: bool,
+    download_run: (usize, usize, Option<String>),
+    /// Result of the last "Copy file" click, shown as a tooltip hint.
+    copy_note: Option<String>,
     thumb_cache: ThumbCache,
     clipboard_watcher: ClipboardWatcher,
     clipboard_watch_enabled: bool,
@@ -358,6 +368,12 @@ impl MediaKitApp {
             open_download_options: false,
             download_filename_template: "%(title)s.%(ext)s".to_string(),
             advanced_open: persisted.advanced_open.unwrap_or(false),
+            notifications_enabled: persisted.notifications_enabled.unwrap_or(true),
+            convert_was_active: false,
+            convert_run: (0, 0, None),
+            download_was_active: false,
+            download_run: (0, 0, None),
+            copy_note: None,
             thumb_cache: ThumbCache::new(),
             clipboard_watcher: ClipboardWatcher::new(),
             clipboard_watch_enabled: persisted.clipboard_watch_enabled.unwrap_or(false),
@@ -434,6 +450,7 @@ impl MediaKitApp {
             override_ytdlp_path: self.override_ytdlp.clone(),
             ytdlp_auto_update_enabled: Some(self.ytdlp_auto_update_enabled),
             advanced_open: Some(self.advanced_open),
+            notifications_enabled: Some(self.notifications_enabled),
             clipboard_watch_enabled: Some(self.clipboard_watch_enabled),
             clipboard_extra_hosts: Some(self.clipboard_extra_hosts.clone()),
             download_responsibility_acknowledged: self.download_responsibility_acknowledged,
@@ -514,10 +531,23 @@ impl MediaKitApp {
         let events: Vec<EngineEvent> = rx.try_iter().collect();
         let mut newly_done: Vec<usize> = Vec::new();
         for event in events {
-            if let EngineEvent::Done { id, .. } = &event {
-                if let Some(idx) = self.items.iter().position(|i| i.id == *id) {
-                    newly_done.push(idx);
+            match &event {
+                EngineEvent::Done { id, .. } => {
+                    if let Some(idx) = self.items.iter().position(|i| i.id == *id) {
+                        newly_done.push(idx);
+                        self.convert_run.0 += 1;
+                        self.convert_run.2 = file_name_of(&self.items[idx].output);
+                    }
                 }
+                EngineEvent::Failed { id, .. } => {
+                    self.convert_run.1 += 1;
+                    self.convert_run.2 = self
+                        .items
+                        .iter()
+                        .find(|i| i.id == *id)
+                        .and_then(|i| file_name_of(&i.input));
+                }
+                _ => {}
             }
             crate::queue::apply_event(&mut self.items, event);
         }
@@ -586,6 +616,31 @@ impl MediaKitApp {
     /// terminal state, compute and store a "n succeeded / n failed" summary
     /// and clear the batch. A no-op while any batch member is still
     /// queued/running, and when there's no batch in flight at all.
+    /// Send one notification when a queue goes from busy to idle having
+    /// finished something - so a Convert All batch or a pile of downloads
+    /// yields a single summary, never one per file.
+    fn notify_when_idle(&mut self) {
+        let convert_active = self.jobs_active();
+        if self.convert_was_active && !convert_active {
+            let (ok, failed, name) = std::mem::take(&mut self.convert_run);
+            if self.notifications_enabled && ok + failed > 0 {
+                let (t, b) = notify::summarize("Conversion", ok, failed, name.as_deref());
+                notify::send(t, b);
+            }
+        }
+        self.convert_was_active = convert_active;
+
+        let download_active = self.download_jobs_active();
+        if self.download_was_active && !download_active {
+            let (ok, failed, name) = std::mem::take(&mut self.download_run);
+            if self.notifications_enabled && ok + failed > 0 {
+                let (t, b) = notify::summarize("Download", ok, failed, name.as_deref());
+                notify::send(t, b);
+            }
+        }
+        self.download_was_active = download_active;
+    }
+
     fn poll_batch_completion(&mut self) {
         if self.batch_ids.is_empty() {
             return;
@@ -790,8 +845,25 @@ impl MediaKitApp {
         let events: Vec<DownloadEvent> = rx.try_iter().collect();
         let mut newly_done: Vec<JobId> = Vec::new();
         for event in events {
-            if let DownloadEvent::Done { id, .. } = &event {
-                newly_done.push(*id);
+            match &event {
+                DownloadEvent::Done { id, .. } => {
+                    newly_done.push(*id);
+                    self.download_run.0 += 1;
+                    self.download_run.2 = self
+                        .download_items
+                        .iter()
+                        .find(|i| i.id == *id)
+                        .map(|i| i.title.clone());
+                }
+                DownloadEvent::Failed { id, .. } => {
+                    self.download_run.1 += 1;
+                    self.download_run.2 = self
+                        .download_items
+                        .iter()
+                        .find(|i| i.id == *id)
+                        .map(|i| i.title.clone());
+                }
+                _ => {}
             }
             crate::download_queue::apply_event(&mut self.download_items, event);
         }
@@ -1429,6 +1501,8 @@ impl MediaKitApp {
 
         let mut to_cancel: Option<JobId> = None;
         let mut to_open_folder: Option<PathBuf> = None;
+        let mut to_copy: Option<PathBuf> = None;
+        let copy_hint = self.copy_note.clone();
         let mut to_show_log: Option<JobId> = None;
         let mut to_fix: Option<(JobId, FixAction)> = None;
 
@@ -1506,6 +1580,9 @@ impl MediaKitApp {
                                         if ui.small_button("Open folder").clicked() {
                                             to_open_folder = Some(path.clone());
                                         }
+                                        if copy_file_button(ui, &copy_hint) {
+                                            to_copy = Some(path.clone());
+                                        }
                                     }
                                 }
                                 if let (DownloadQueueStatus::Failed(_), Some((_, action))) =
@@ -1545,7 +1622,19 @@ impl MediaKitApp {
             }
         }
         if let Some(path) = to_open_folder {
-            sys::open_containing_folder(&path);
+            sys::reveal_in_file_manager(&path);
+        }
+        if let Some(path) = to_copy {
+            self.copy_note = Some(
+                match sys::copy_file_to_clipboard(&path) {
+                    sys::CopyOutcome::File => "Copied the file - paste it with Ctrl+V.",
+                    sys::CopyOutcome::PathText => {
+                        "Couldn't copy the file itself on this system; copied its path as text."
+                    }
+                    sys::CopyOutcome::Failed => "Couldn't access the clipboard.",
+                }
+                .to_string(),
+            );
         }
         if let Some(id) = to_show_log {
             self.download_show_log_for = Some(id);
@@ -2420,6 +2509,8 @@ impl MediaKitApp {
         let mut to_submit: Option<usize> = None;
         let mut to_cancel: Option<JobId> = None;
         let mut to_open_folder: Option<PathBuf> = None;
+        let mut to_copy: Option<PathBuf> = None;
+        let copy_hint = self.copy_note.clone();
         let mut to_show_log: Option<JobId> = None;
 
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -2536,10 +2627,13 @@ impl MediaKitApp {
                             {
                                 to_cancel = Some(item.id);
                             }
-                            if item.status == QueueStatus::Done
-                                && ui.small_button("Open folder").clicked()
-                            {
-                                to_open_folder = Some(item.output.clone());
+                            if item.status == QueueStatus::Done {
+                                if ui.small_button("Open folder").clicked() {
+                                    to_open_folder = Some(item.output.clone());
+                                }
+                                if copy_file_button(ui, &copy_hint) {
+                                    to_copy = Some(item.output.clone());
+                                }
                             }
                             if !item.log.is_empty() && ui.small_button("Show log").clicked() {
                                 to_show_log = Some(item.id);
@@ -2575,7 +2669,19 @@ impl MediaKitApp {
             }
         }
         if let Some(path) = to_open_folder {
-            sys::open_containing_folder(&path);
+            sys::reveal_in_file_manager(&path);
+        }
+        if let Some(path) = to_copy {
+            self.copy_note = Some(
+                match sys::copy_file_to_clipboard(&path) {
+                    sys::CopyOutcome::File => "Copied the file - paste it with Ctrl+V.",
+                    sys::CopyOutcome::PathText => {
+                        "Couldn't copy the file itself on this system; copied its path as text."
+                    }
+                    sys::CopyOutcome::Failed => "Couldn't access the clipboard.",
+                }
+                .to_string(),
+            );
         }
         if let Some(id) = to_show_log {
             self.show_log_for = Some(id);
@@ -2906,6 +3012,10 @@ impl MediaKitApp {
                 });
                 ui.add_space(8.0);
                 ui.heading("Behavior");
+                ui.checkbox(
+                    &mut self.notifications_enabled,
+                    "Notify me when conversions or downloads finish",
+                );
                 ui.checkbox(
                     &mut self.clipboard_watch_enabled,
                     "Offer to download links I copy",
@@ -3250,6 +3360,27 @@ impl MediaKitApp {
     }
 }
 
+/// "Copy file" button. Its tooltip explains the fallback and shows how the
+/// previous copy went.
+fn copy_file_button(ui: &mut egui::Ui, last_result: &Option<String>) -> bool {
+    let response = ui.small_button("Copy file");
+    response.clone().on_hover_ui(|ui| {
+        ui.label(
+            "Copies the file so you can paste it straight into Discord or a folder. \
+             If this system can't copy files, the path is copied as text instead.",
+        );
+        if let Some(note) = last_result {
+            ui.separator();
+            ui.label(note);
+        }
+    });
+    response.clicked()
+}
+
+fn file_name_of(path: &std::path::Path) -> Option<String> {
+    path.file_name().map(|n| n.to_string_lossy().into_owned())
+}
+
 /// The OS's Downloads folder, falling back to the home directory and then
 /// the current directory if that's not available (e.g. `XDG_DOWNLOAD_DIR`
 /// unset on a minimal Linux setup).
@@ -3474,6 +3605,7 @@ impl eframe::App for MediaKitApp {
         self.poll_metadata();
         self.poll_download_events();
         self.poll_update_events();
+        self.notify_when_idle();
         self.maybe_start_auto_update_check();
         self.handle_dropped_files(&ctx);
         self.handle_global_paste(&ctx);

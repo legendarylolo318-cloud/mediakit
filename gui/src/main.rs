@@ -10,6 +10,7 @@ mod encode_config;
 mod error_hint;
 mod format;
 mod metadata_worker;
+mod notify;
 mod output;
 mod paste;
 mod preset_cards;
