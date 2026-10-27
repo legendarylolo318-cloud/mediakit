@@ -95,6 +95,8 @@ fn show_items_over_dbus(path: &Path) -> bool {
 
 /// Percent-encode everything but unreserved characters and `/`, as needed
 /// for `file://` URIs (spaces and non-ASCII are common in media filenames).
+// Only the Linux paths build `file://` URIs; the tests cover it everywhere.
+#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
 pub fn percent_encode_path(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for b in path.bytes() {
