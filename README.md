@@ -4,10 +4,14 @@ A native, cross-platform desktop app for converting and shrinking video, audio, 
 
 Built with Rust + [egui](https://github.com/emilk/egui) for the GUI, and drives `ffmpeg`/`ffprobe`/`yt-dlp` as subprocesses for all media work. The default download bundles all three, so **nothing needs to be installed separately** — download one file, run it.
 
-<!--
-  Screenshot placeholder: drop images in docs/ and reference them here, e.g.
-  ![Batch queue with a Discord preset applied](docs/screenshot-queue.png)
--->
+## Screenshots
+
+| | |
+|---|---|
+| ![Convert tab with preset cards and the visual trim timeline](docs/screenshots/convert-trim.png) | ![A finished Convert All batch, with Open folder and Copy file on every row (Nord theme)](docs/screenshots/convert-queue.png) |
+| **Convert**: preset cards first; Advanced holds codec, quality and the thumbnail trim timeline. | **Batch queue**: one summary when a batch finishes; Open folder and Copy file on every finished row (Nord theme). |
+| ![Download tab after pasting a YouTube link (Pink theme)](docs/screenshots/download.png) | ![The clipboard watcher offering to download a copied link](docs/screenshots/clipboard-offer.png) |
+| **Download**: paste a link anywhere and it fetches and downloads in one step (Pink theme). | **Clipboard watcher** (optional): offers to download video links you copy. |
 
 
 ## Features
@@ -30,7 +34,7 @@ Built with Rust + [egui](https://github.com/emilk/egui) for the GUI, and drives 
 - Options: embed thumbnail/metadata, subtitles (with auto-subs), SponsorBlock removal, rate limiting, concurrent fragments, custom filename template
 - Login-required content: cookies from a browser profile or a `cookies.txt` file — MediaKit never stores credentials and redacts cookie values from any displayed/copied command
 - **Chaining**: "Download → Discord-size clip", "Download → GIF", "Download → MP3" queue as one entry; the intermediate download is cleaned up automatically once the conversion finishes
-- Self-update: check for and install newer `yt-dlp` releases from Settings → Tools (checksum-verified, with one-click rollback), plus an optional weekly auto-check
+- Self-update: check for and install newer `yt-dlp` releases from Settings → Tools (checksum-verified, with one-click rollback), plus an automatic check at launch (at most once a day, on by default)
 - **YouTube PO-token helper** (optional, on by default): runs a local [bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider) server to work around YouTube's "Sign in to confirm you're not a bot" 403s. Starts lazily the first time a YouTube/`youtu.be` URL is queued, with a toggle in Settings and its state folded into the status dot in the status bar. Needs a system Node.js ≥ 22 the first time it's used — if that's missing, YouTube downloads still work, just without this. Never touches your system yt-dlp install, `PATH`, or `~/.config/yt-dlp/`.
 
 MediaKit only ever shells out to `yt-dlp` — it doesn't implement site-specific extraction itself, and it will not attempt to work around DRM. **You're responsible for complying with the terms of service and copyright law of whatever site or content you download from.**
