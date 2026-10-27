@@ -2340,6 +2340,9 @@ impl MediaKitApp {
             self.thumb_cache.request(&env.ffmpeg_path, path, *duration);
             if self.thumb_cache.poll(ui.ctx()) {
                 ui.ctx().request_repaint();
+            } else if self.thumb_cache.is_loading(path) {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(100));
             }
             let start = self.config.trim_start_seconds.unwrap_or(0.0);
             let end = self

@@ -15,6 +15,8 @@ const THUMB_W: usize = 160;
 const THUMB_H: usize = 90;
 /// Handles can't be dragged closer than this (seconds).
 const MIN_SELECTION: f64 = 0.1;
+/// Grab width of a handle (pixels).
+const HANDLE_W: f32 = 12.0;
 
 /// Times (seconds) to grab frames at: the midpoint of each of `n` equal
 /// segments, so the first and last frames aren't black fade-in/out frames.
@@ -53,15 +55,32 @@ pub fn clamp_range(start: f64, end: f64, duration: f64, moved_start: bool) -> (f
     }
 }
 
+/// The horizontal grab area for a handle at `x`. Each handle sits on the
+/// *outside* of the selection, so with start and end at the same spot (a
+/// zero-length selection, or both pinned at the clip's end) the two areas
+/// barely touch and either one can still be grabbed.
+pub fn handle_span(x: f32, is_start: bool) -> (f32, f32) {
+    let inner = 2.0;
+    if is_start {
+        (x - (HANDLE_W - inner), x + inner)
+    } else {
+        (x - inner, x + (HANDLE_W - inner))
+    }
+}
+
 struct Thumb {
     path: PathBuf,
     index: usize,
-    rgba: Vec<u8>,
+    /// `None` when ffmpeg couldn't produce this frame; still sent so the
+    /// cache knows extraction for that slot is over.
+    rgba: Option<Vec<u8>>,
 }
 
 #[derive(Default)]
 struct Entry {
     textures: Vec<Option<egui::TextureHandle>>,
+    /// Frames not yet reported back by the extraction thread.
+    pending: usize,
 }
 
 pub struct ThumbCache {
@@ -89,6 +108,7 @@ impl ThumbCache {
             path.to_path_buf(),
             Entry {
                 textures: vec![None; THUMB_COUNT],
+                pending: thumbnail_times(duration, THUMB_COUNT).len(),
             },
         );
         let sender = self.sender.clone();
@@ -99,17 +119,14 @@ impl ThumbCache {
                 .into_iter()
                 .enumerate()
             {
-                if let Some(rgba) = extract_frame(&ffmpeg, &path, t) {
-                    if sender
-                        .send(Thumb {
-                            path: path.clone(),
-                            index,
-                            rgba,
-                        })
-                        .is_err()
-                    {
-                        return;
-                    }
+                let rgba = extract_frame(&ffmpeg, &path, t);
+                let thumb = Thumb {
+                    path: path.clone(),
+                    index,
+                    rgba,
+                };
+                if sender.send(thumb).is_err() {
+                    return;
                 }
             }
         });
@@ -123,7 +140,11 @@ impl ThumbCache {
             let Some(entry) = self.entries.get_mut(&thumb.path) else {
                 continue;
             };
-            let image = egui::ColorImage::from_rgba_unmultiplied([THUMB_W, THUMB_H], &thumb.rgba);
+            entry.pending = entry.pending.saturating_sub(1);
+            let Some(rgba) = thumb.rgba else {
+                continue;
+            };
+            let image = egui::ColorImage::from_rgba_unmultiplied([THUMB_W, THUMB_H], &rgba);
             let name = format!("thumb:{}:{}", thumb.path.display(), thumb.index);
             if let Some(slot) = entry.textures.get_mut(thumb.index) {
                 *slot = Some(ctx.load_texture(name, image, egui::TextureOptions::LINEAR));
@@ -131,6 +152,12 @@ impl ThumbCache {
             }
         }
         got
+    }
+
+    /// Whether frames for `path` are still being extracted. The worker
+    /// thread can't wake the UI, so the caller keeps repainting until false.
+    pub fn is_loading(&self, path: &Path) -> bool {
+        self.entries.get(path).is_some_and(|e| e.pending > 0)
     }
 
     fn textures(&self, path: &Path) -> Option<&[Option<egui::TextureHandle>]> {
@@ -222,10 +249,8 @@ pub fn show(
 
     let mut result = None;
     for (is_start, x) in [(true, x_start), (false, x_end)] {
-        let handle = egui::Rect::from_center_size(
-            egui::pos2(x, rect.center().y),
-            egui::vec2(12.0, rect.height()),
-        );
+        let (left, right) = handle_span(x, is_start);
+        let handle = egui::Rect::from_x_y_ranges(left..=right, rect.y_range());
         let id = ui.id().with(("trim_handle", is_start));
         let response = ui
             .interact(handle, id, egui::Sense::drag())
@@ -266,6 +291,24 @@ mod tests {
         assert_eq!(x_to_time(999.0, 100.0, 200.0, 60.0), 60.0);
         assert_eq!(time_to_x(15.0, 100.0, 200.0, 60.0), 150.0);
         assert_eq!(time_to_x(5.0, 100.0, 200.0, 0.0), 100.0);
+    }
+
+    #[test]
+    fn coincident_handles_stay_separately_grabbable() {
+        let (s_left, s_right) = handle_span(100.0, true);
+        let (e_left, e_right) = handle_span(100.0, false);
+        assert!(s_left < e_left && s_right < e_right);
+        // They overlap by at most a few pixels, so each has its own area.
+        assert!(s_right - e_left <= 4.0);
+        assert!(s_right - s_left == HANDLE_W && e_right - e_left == HANDLE_W);
+    }
+
+    #[test]
+    fn very_short_clips_still_allow_a_selection() {
+        let (s, e) = clamp_range(0.4, 0.4, 0.5, false);
+        assert!(e > s && e <= 0.5);
+        let (s, e) = clamp_range(0.0, 0.05, 0.05, true);
+        assert!(s == 0.0 && e == 0.05);
     }
 
     #[test]
