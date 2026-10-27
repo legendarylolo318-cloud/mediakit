@@ -1697,7 +1697,7 @@ impl MediaKitApp {
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let can_cancel = self.jobs_active();
-                    ui.menu_button("\u{22EF}", |ui| {
+                    ui.menu_button("\u{2026}", |ui| {
                         if ui.button("Presets\u{2026}").clicked() {
                             self.show_presets_editor = true;
                             ui.close();
@@ -1780,7 +1780,7 @@ impl MediaKitApp {
                 restart = true;
                 ui.close();
             }
-            if ui.button("Open Settings \u{2192} Tools").clicked() {
+            if ui.button("Open Settings (Tools)").clicked() {
                 open_settings = true;
                 ui.close();
             }
@@ -2360,7 +2360,7 @@ impl MediaKitApp {
                 self.config.trim_end_seconds = (e < *duration).then_some(e);
             }
             ui.label(format!(
-                "Selected: {} ({} \u{2192} {})",
+                "Selected: {} ({} -> {})",
                 format::duration((end - start).max(0.0)),
                 format::duration(start),
                 format::duration(end)

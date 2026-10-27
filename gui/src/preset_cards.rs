@@ -26,7 +26,7 @@ impl Card {
     pub fn name(self) -> &'static str {
         match self {
             Card::DiscordClip => "Discord clip",
-            Card::Gif => "Video \u{2192} GIF",
+            Card::Gif => "Video -> GIF",
             Card::Mp3 => "Extract MP3",
             Card::Compress => "Compress",
             Card::Image => "Convert image",
