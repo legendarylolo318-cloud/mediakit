@@ -207,10 +207,9 @@ pub struct MediaKitApp {
     clipboard_extra_hosts: String,
     /// Host list the running watcher was started with, to notice edits.
     clipboard_hosts_applied: String,
-    /// A link the watcher found, awaiting the user's Download/Dismiss.
-    clipboard_offer: Option<String>,
-    /// Last link offered or dismissed, so it never prompts twice in a row.
-    clipboard_last_offered: Option<String>,
+    /// The link the toast is offering, and every link already offered or
+    /// downloaded, so none prompts twice.
+    clipboard_offers: clipboard_watch::Offers,
 
     download_format: FormatChoice,
     download_custom_format: String,
@@ -379,8 +378,7 @@ impl MediaKitApp {
             clipboard_watch_enabled: persisted.clipboard_watch_enabled.unwrap_or(false),
             clipboard_extra_hosts: persisted.clipboard_extra_hosts.clone().unwrap_or_default(),
             clipboard_hosts_applied: String::new(),
-            clipboard_offer: None,
-            clipboard_last_offered: None,
+            clipboard_offers: clipboard_watch::Offers::default(),
 
             download_format: FormatChoice::Best,
             download_custom_format: String::new(),
@@ -957,7 +955,11 @@ impl MediaKitApp {
         let cookies = self.current_cookie_source();
         for line in self.download_url_input.lines() {
             let url = line.trim().to_string();
-            if url.is_empty() || self.download_cards.iter().any(|c| c.url == url) {
+            if url.is_empty() {
+                continue;
+            }
+            self.clipboard_offers.handled(&url);
+            if self.download_cards.iter().any(|c| c.url == url) {
                 continue;
             }
             self.metadata_worker.submit(
@@ -3238,7 +3240,7 @@ impl MediaKitApp {
         let hosts_changed = self.clipboard_hosts_applied != self.clipboard_extra_hosts;
         if !self.clipboard_watch_enabled {
             self.clipboard_watcher.stop();
-            self.clipboard_offer = None;
+            self.clipboard_offers.current = None;
             return;
         }
         if self.clipboard_watcher.is_running() && hosts_changed {
@@ -3252,10 +3254,7 @@ impl MediaKitApp {
                 ));
         }
         for url in self.clipboard_watcher.poll() {
-            if self.clipboard_last_offered.as_deref() != Some(url.as_str()) {
-                self.clipboard_last_offered = Some(url.clone());
-                self.clipboard_offer = Some(url);
-            }
+            self.clipboard_offers.copied(url);
         }
         // The poller thread can't wake the UI, so check back periodically.
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
@@ -3263,7 +3262,7 @@ impl MediaKitApp {
 
     /// Small dismissible "Download <url>?" prompt in the bottom-right corner.
     fn clipboard_toast(&mut self, ctx: &egui::Context) {
-        let Some(url) = self.clipboard_offer.clone() else {
+        let Some(url) = self.clipboard_offers.current.clone() else {
             return;
         };
         let mut download = false;
@@ -3289,7 +3288,7 @@ impl MediaKitApp {
             }
         }
         if download || dismiss {
-            self.clipboard_offer = None;
+            self.clipboard_offers.current = None;
         }
     }
 

@@ -63,6 +63,34 @@ pub fn shorten(url: &str, max_chars: usize) -> String {
     format!("{kept}\u{2026}")
 }
 
+/// Which copied link (if any) the toast is offering, and which links have
+/// already been dealt with - so a URL is never offered twice, including one
+/// the user already pasted or downloaded some other way before the
+/// watcher's next poll reported it.
+#[derive(Default)]
+pub struct Offers {
+    pub current: Option<String>,
+    handled: std::collections::HashSet<String>,
+}
+
+impl Offers {
+    /// A newly copied link from the watcher; offered unless already handled.
+    pub fn copied(&mut self, url: String) {
+        if self.handled.insert(url.clone()) {
+            self.current = Some(url);
+        }
+    }
+
+    /// `url` is being downloaded (pasted, typed, or accepted from the toast):
+    /// drop any toast for it and never offer it later.
+    pub fn handled(&mut self, url: &str) {
+        self.handled.insert(url.to_string());
+        if self.current.as_deref() == Some(url) {
+            self.current = None;
+        }
+    }
+}
+
 pub struct ClipboardWatcher {
     stop: Arc<AtomicBool>,
     pub receiver: Receiver<String>,
@@ -159,6 +187,26 @@ mod tests {
         assert_eq!(extra, ["bilibili.com", "nicovideo.jp", "example.org"]);
         assert!(is_offerable("https://www.bilibili.com/video/BV1", &extra));
         assert!(!is_offerable("https://bilibili.com/x", &[]));
+    }
+
+    #[test]
+    fn a_link_is_offered_once_and_never_after_being_pasted() {
+        let mut offers = Offers::default();
+        offers.copied("https://youtu.be/a".into());
+        assert_eq!(offers.current.as_deref(), Some("https://youtu.be/a"));
+        offers.current = None; // dismissed
+        offers.copied("https://youtu.be/a".into());
+        assert_eq!(offers.current, None);
+
+        // Pasted into the app before the watcher reported it: no toast later.
+        offers.handled("https://youtu.be/b");
+        offers.copied("https://youtu.be/b".into());
+        assert_eq!(offers.current, None);
+
+        // Pasted while its toast is showing: the toast goes away.
+        offers.copied("https://youtu.be/c".into());
+        offers.handled("https://youtu.be/c");
+        assert_eq!(offers.current, None);
     }
 
     #[test]
