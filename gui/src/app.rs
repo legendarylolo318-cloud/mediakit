@@ -1625,16 +1625,7 @@ impl MediaKitApp {
             sys::reveal_in_file_manager(&path);
         }
         if let Some(path) = to_copy {
-            self.copy_note = Some(
-                match sys::copy_file_to_clipboard(&path) {
-                    sys::CopyOutcome::File => "Copied the file - paste it with Ctrl+V.",
-                    sys::CopyOutcome::PathText => {
-                        "Couldn't copy the file itself on this system; copied its path as text."
-                    }
-                    sys::CopyOutcome::Failed => "Couldn't access the clipboard.",
-                }
-                .to_string(),
-            );
+            self.copy_file(ui.ctx(), &path);
         }
         if let Some(id) = to_show_log {
             self.download_show_log_for = Some(id);
@@ -2672,16 +2663,7 @@ impl MediaKitApp {
             sys::reveal_in_file_manager(&path);
         }
         if let Some(path) = to_copy {
-            self.copy_note = Some(
-                match sys::copy_file_to_clipboard(&path) {
-                    sys::CopyOutcome::File => "Copied the file - paste it with Ctrl+V.",
-                    sys::CopyOutcome::PathText => {
-                        "Couldn't copy the file itself on this system; copied its path as text."
-                    }
-                    sys::CopyOutcome::Failed => "Couldn't access the clipboard.",
-                }
-                .to_string(),
-            );
+            self.copy_file(ui.ctx(), &path);
         }
         if let Some(id) = to_show_log {
             self.show_log_for = Some(id);
@@ -3344,6 +3326,18 @@ impl MediaKitApp {
                 Paste::Other => {}
             }
         }
+    }
+
+    /// "Copy file": the file itself where the platform supports it,
+    /// otherwise its path as text.
+    fn copy_file(&mut self, ctx: &egui::Context, path: &std::path::Path) {
+        let note = if sys::copy_file_to_clipboard(path) {
+            "Copied the file - paste it with Ctrl+V."
+        } else {
+            ctx.copy_text(path.to_string_lossy().into_owned());
+            "Couldn't copy the file itself on this system; copied its path as text."
+        };
+        self.copy_note = Some(note.to_string());
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {

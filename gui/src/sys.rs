@@ -58,27 +58,39 @@ pub fn reveal_in_file_manager(path: &Path) {
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let uri = format!("file://{}", percent_encode_path(&path.to_string_lossy()));
-        let shown = std::process::Command::new("dbus-send")
-            .args([
-                "--session",
-                "--print-reply",
-                "--dest=org.freedesktop.FileManager1",
-                "--type=method_call",
-                "/org/freedesktop/FileManager1",
-                "org.freedesktop.FileManager1.ShowItems",
-            ])
-            .arg(format!("array:string:{uri}"))
-            .arg("string:")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-        if shown {
-            return;
-        }
+        // `dbus-send --print-reply` waits for the file manager (up to its
+        // 25 s default timeout when it has to launch one first), so this
+        // runs on its own thread rather than freezing the UI that clicked.
+        let path = path.to_path_buf();
+        std::thread::spawn(move || {
+            if !show_items_over_dbus(&path) {
+                open_containing_folder(&path);
+            }
+        });
     }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
     open_containing_folder(path);
+}
+
+/// Ask the freedesktop FileManager1 service to show `path` selected.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn show_items_over_dbus(path: &Path) -> bool {
+    let uri = format!("file://{}", percent_encode_path(&path.to_string_lossy()));
+    std::process::Command::new("dbus-send")
+        .args([
+            "--session",
+            "--print-reply",
+            "--dest=org.freedesktop.FileManager1",
+            "--type=method_call",
+            "/org/freedesktop/FileManager1",
+            "org.freedesktop.FileManager1.ShowItems",
+        ])
+        .arg(format!("array:string:{uri}"))
+        .arg("string:")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// Percent-encode everything but unreserved characters and `/`, as needed
@@ -96,26 +108,12 @@ pub fn percent_encode_path(path: &str) -> String {
     out
 }
 
-/// How a "Copy file" request ended up on the clipboard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CopyOutcome {
-    /// The file itself: Ctrl+V into Discord/a file manager pastes the file.
-    File,
-    /// Only the path as text (no file-clipboard support available).
-    PathText,
-    Failed,
-}
-
 /// Put `path` on the clipboard as a file, so it can be pasted straight into
-/// Discord. Falls back to copying the path as text.
-pub fn copy_file_to_clipboard(path: &Path) -> CopyOutcome {
-    if copy_as_file(path) {
-        return CopyOutcome::File;
-    }
-    match arboard::Clipboard::new().and_then(|mut c| c.set_text(path.to_string_lossy())) {
-        Ok(()) => CopyOutcome::PathText,
-        Err(_) => CopyOutcome::Failed,
-    }
+/// Discord. `false` when this system has no way to do that; the caller then
+/// copies the path as text through egui, which (unlike a short-lived
+/// `arboard::Clipboard`) keeps serving the selection on X11/Wayland.
+pub fn copy_file_to_clipboard(path: &Path) -> bool {
+    copy_as_file(path)
 }
 
 /// Linux: `text/uri-list` via `wl-copy` (Wayland) or `xclip` (X11), whichever
