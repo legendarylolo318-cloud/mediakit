@@ -139,11 +139,24 @@ jobs:
           path: ~/.cargo/mediakit-vendor
           key: vendor-${{ runner.os }}-${{ hashFiles('core/vendor.toml') }}
 
-      - name: Build release binary (bundled, default features)
-        run: cargo build --release -p mediakit
+      # Built exactly like the release job (zigbuild against the glibc 2.17
+      # baseline), so this tests the binary users actually download - and so
+      # it still starts in the older-glibc container below whatever glibc the
+      # runner image itself has moved on to.
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+
+      - name: Install cargo-zigbuild
+        run: cargo install --locked cargo-zigbuild
+
+      - name: Build release binary (bundled, default features, old-glibc baseline)
+        run: |
+          set -euo pipefail
+          cargo zigbuild --release -p mediakit --target x86_64-unknown-linux-gnu.2.17
+          echo "MEDIAKIT_BIN=target/x86_64-unknown-linux-gnu/release/mediakit" >> "$GITHUB_ENV"
 
       - name: Report binary size
-        run: du -h target/release/mediakit
+        run: du -h "$MEDIAKIT_BIN"
 
       # Only the host needs ffmpeg here, to synthesize a test clip - the
       # container the actual conversion runs in below gets none.
@@ -170,7 +183,7 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm \
-            -v "${{ github.workspace }}/target/release/mediakit:/app/mediakit:ro" \
+            -v "${{ github.workspace }}/${{ env.MEDIAKIT_BIN }}:/app/mediakit:ro" \
             -v "${{ github.workspace }}/smoke:/work" \
             -w /work \
             ubuntu:24.04 \
