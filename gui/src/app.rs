@@ -1538,10 +1538,6 @@ impl MediaKitApp {
                         self.add_files(paths);
                     }
                 }
-                if ui.button("Clear").on_hover_text("Ctrl+W").clicked() {
-                    self.cancel_all();
-                    self.items.clear();
-                }
                 ui.separator();
                 let convert_all_enabled = !self.items.is_empty() && !self.jobs_active();
                 if ui
@@ -1550,9 +1546,6 @@ impl MediaKitApp {
                     .clicked()
                 {
                     self.convert_all();
-                }
-                if ui.button("Cancel All").on_hover_text("Ctrl+.").clicked() {
-                    self.cancel_all();
                 }
                 ui.separator();
                 match &self.ffmpeg_status {
@@ -1574,25 +1567,36 @@ impl MediaKitApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    egui::ComboBox::new("theme_combo", "")
-                        .selected_text(theme_label(self.theme))
-                        .show_ui(ui, |ui| {
-                            for choice in ThemeChoice::ALL {
-                                if ui
-                                    .selectable_value(&mut self.theme, choice, theme_label(choice))
-                                    .changed()
-                                {
-                                    apply_theme(ui.ctx(), choice);
-                                }
-                            }
-                        });
-                    ui.label("Theme:");
-                    if ui.button("Presets").clicked() {
-                        self.show_presets_editor = true;
-                    }
-                    if ui.button("Licenses").clicked() {
-                        self.show_licenses = true;
-                    }
+                    let can_cancel = self.jobs_active();
+                    ui.menu_button("\u{22EF}", |ui| {
+                        if ui.button("Presets\u{2026}").clicked() {
+                            self.show_presets_editor = true;
+                            ui.close();
+                        }
+                        if ui.button("Licenses").clicked() {
+                            self.show_licenses = true;
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui
+                            .add(egui::Button::new("Clear queue").shortcut_text("Ctrl+W"))
+                            .clicked()
+                        {
+                            self.cancel_all();
+                            self.items.clear();
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(
+                                can_cancel,
+                                egui::Button::new("Cancel all").shortcut_text("Ctrl+."),
+                            )
+                            .clicked()
+                        {
+                            self.cancel_all();
+                            ui.close();
+                        }
+                    });
                     if ui.button("Settings").clicked() {
                         self.show_settings = true;
                     }
@@ -2733,6 +2737,23 @@ impl MediaKitApp {
             .open(&mut open)
             .default_size([560.0, 420.0])
             .show(ctx, |ui| {
+                ui.heading("Appearance");
+                ui.horizontal(|ui| {
+                    ui.label("Theme:");
+                    egui::ComboBox::new("theme_combo", "")
+                        .selected_text(theme_label(self.theme))
+                        .show_ui(ui, |ui| {
+                            for choice in ThemeChoice::ALL {
+                                if ui
+                                    .selectable_value(&mut self.theme, choice, theme_label(choice))
+                                    .changed()
+                                {
+                                    apply_theme(ui.ctx(), choice);
+                                }
+                            }
+                        });
+                });
+                ui.add_space(8.0);
                 ui.heading("Tools");
                 ui.label(
                     "MediaKit bundles its own ffmpeg/ffprobe/yt-dlp, extracted here on \
