@@ -793,6 +793,16 @@ impl MediaKitApp {
         }
     }
 
+    /// Work whose result arrives over a channel with nothing to repaint the
+    /// UI when it lands.
+    fn waiting_on_background_result(&self) -> bool {
+        self.ytdlp_update_in_progress
+            || self
+                .download_cards
+                .iter()
+                .any(|c| matches!(c.state, DownloadCardState::Fetching))
+    }
+
     fn download_jobs_active(&self) -> bool {
         self.download_items.iter().any(|i| {
             matches!(
@@ -3691,6 +3701,11 @@ impl eframe::App for MediaKitApp {
             || self.pot_manager.state() == mediakit_core::pot_provider::PotProviderState::Starting;
         if still_working {
             ctx.request_repaint();
+        } else if self.waiting_on_background_result() {
+            // Metadata fetches and yt-dlp updates report over channels that
+            // can't wake the UI; without this a fetch "hung" on "Fetching
+            // metadata..." until the mouse moved.
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
     }
 
