@@ -2432,7 +2432,7 @@ impl MediaKitApp {
     }
 
     fn output_settings_row(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let mut same_as_source =
                 matches!(self.output_settings.location, OutputLocation::SameAsSource);
             if ui
@@ -2529,7 +2529,7 @@ impl MediaKitApp {
         let copy_hint = self.copy_note.clone();
         let mut to_show_log: Option<JobId> = None;
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::both().show(ui, |ui| {
             egui::Grid::new("queue_grid")
                 .striped(true)
                 .num_columns(6)
