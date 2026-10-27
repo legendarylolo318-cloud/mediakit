@@ -4,6 +4,7 @@ use crate::error_hint::{self, FixAction};
 use crate::format;
 use crate::metadata_worker::MetadataWorker;
 use crate::output::{OutputLocation, OutputSettings};
+use crate::paste::{self, Paste};
 use crate::preset_cards::Card;
 use crate::probe_worker::ProbeWorker;
 use crate::queue::{QueueItem, QueueStatus};
@@ -3065,6 +3066,41 @@ impl MediaKitApp {
         }
     }
 
+    /// Ctrl+V with the window focused and no text field editing: links go to
+    /// the Download tab and start downloading, file paths join the Convert
+    /// queue. A paste aimed at a focused text field is never touched - egui
+    /// reports those as keyboard-wanting, so we bail out before looking.
+    fn handle_global_paste(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() || !ctx.input(|i| i.focused) {
+            return;
+        }
+        let pasted: Vec<String> = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::Paste(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        });
+        for text in pasted {
+            match paste::classify(&text, |p| p.is_file()) {
+                Paste::Urls(urls) => {
+                    self.active_tab = AppTab::Download;
+                    self.download_url_input = urls.join("\n");
+                    if self.download_responsibility_acknowledged && self.ytdlp_path().is_some() {
+                        self.fetch_download_urls(true);
+                    }
+                }
+                Paste::Files(paths) => {
+                    self.active_tab = AppTab::Convert;
+                    self.add_files(paths);
+                }
+                Paste::Other => {}
+            }
+        }
+    }
+
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
@@ -3305,6 +3341,7 @@ impl eframe::App for MediaKitApp {
         self.poll_update_events();
         self.maybe_start_auto_update_check();
         self.handle_dropped_files(&ctx);
+        self.handle_global_paste(&ctx);
         self.handle_shortcuts(&ctx);
 
         let screen = ctx.input(|i| i.viewport_rect());
