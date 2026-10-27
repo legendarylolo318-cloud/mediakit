@@ -3531,8 +3531,32 @@ fn themed_visuals(
     visuals.widgets.hovered.fg_stroke.color = text;
     visuals.widgets.active.bg_fill = accent;
     visuals.widgets.active.weak_bg_fill = accent;
-    visuals.widgets.active.fg_stroke.color = base_bg;
+    // Not `base_bg`, even though that reads better on a pressed accent
+    // button: egui also uses this colour for `ui.strong`/headings, so the
+    // queue's column headers vanished into the background.
+    visuals.widgets.active.fg_stroke.color = text;
     visuals
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::*;
+
+    #[test]
+    fn strong_text_is_visible_in_every_custom_theme() {
+        for visuals in [
+            nord_visuals(),
+            solarized_dark_visuals(),
+            high_contrast_visuals(),
+            pink_visuals(),
+        ] {
+            assert_ne!(visuals.strong_text_color(), visuals.panel_fill);
+            assert_eq!(
+                Some(visuals.strong_text_color()),
+                visuals.override_text_color
+            );
+        }
+    }
 }
 
 fn nord_visuals() -> egui::Visuals {
