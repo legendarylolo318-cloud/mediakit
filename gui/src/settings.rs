@@ -82,6 +82,11 @@ pub struct PersistedSettings {
     pub pot_provider_port: Option<u16>,
     /// Whether the Convert tab's Advanced section was left open.
     pub advanced_open: Option<bool>,
+    /// Offer to download video links copied to the clipboard. Off by default.
+    pub clipboard_watch_enabled: Option<bool>,
+    /// Extra hosts (comma/space/newline separated) the clipboard watcher
+    /// should also offer, on top of the built-in list.
+    pub clipboard_extra_hosts: Option<String>,
 }
 
 fn settings_path() -> Option<PathBuf> {

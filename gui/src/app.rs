@@ -1,3 +1,4 @@
+use crate::clipboard_watch::{self, ClipboardWatcher};
 use crate::download_queue::{DownloadQueueItem, DownloadQueueStatus};
 use crate::encode_config::{EncodeConfig, Mode, TargetSizeChoice};
 use crate::error_hint::{self, FixAction};
@@ -189,6 +190,15 @@ pub struct MediaKitApp {
     open_download_options: bool,
     download_filename_template: String,
     advanced_open: bool,
+    clipboard_watcher: ClipboardWatcher,
+    clipboard_watch_enabled: bool,
+    clipboard_extra_hosts: String,
+    /// Host list the running watcher was started with, to notice edits.
+    clipboard_hosts_applied: String,
+    /// A link the watcher found, awaiting the user's Download/Dismiss.
+    clipboard_offer: Option<String>,
+    /// Last link offered or dismissed, so it never prompts twice in a row.
+    clipboard_last_offered: Option<String>,
 
     download_format: FormatChoice,
     download_custom_format: String,
@@ -346,6 +356,12 @@ impl MediaKitApp {
             open_download_options: false,
             download_filename_template: "%(title)s.%(ext)s".to_string(),
             advanced_open: persisted.advanced_open.unwrap_or(false),
+            clipboard_watcher: ClipboardWatcher::new(),
+            clipboard_watch_enabled: persisted.clipboard_watch_enabled.unwrap_or(false),
+            clipboard_extra_hosts: persisted.clipboard_extra_hosts.clone().unwrap_or_default(),
+            clipboard_hosts_applied: String::new(),
+            clipboard_offer: None,
+            clipboard_last_offered: None,
 
             download_format: FormatChoice::Best,
             download_custom_format: String::new(),
@@ -415,6 +431,8 @@ impl MediaKitApp {
             override_ytdlp_path: self.override_ytdlp.clone(),
             ytdlp_auto_update_enabled: Some(self.ytdlp_auto_update_enabled),
             advanced_open: Some(self.advanced_open),
+            clipboard_watch_enabled: Some(self.clipboard_watch_enabled),
+            clipboard_extra_hosts: Some(self.clipboard_extra_hosts.clone()),
             download_responsibility_acknowledged: self.download_responsibility_acknowledged,
             download_output_dir: Some(self.download_output_dir.clone()),
             pot_provider_enabled: Some(self.pot_config.enabled),
@@ -2848,6 +2866,23 @@ impl MediaKitApp {
                         });
                 });
                 ui.add_space(8.0);
+                ui.heading("Behavior");
+                ui.checkbox(
+                    &mut self.clipboard_watch_enabled,
+                    "Offer to download links I copy",
+                )
+                .on_hover_text(
+                    "Checks the clipboard about once a second for video links \
+                     (YouTube, TikTok, Reddit, ...) and shows a small prompt.",
+                );
+                if self.clipboard_watch_enabled {
+                    ui.horizontal(|ui| {
+                        ui.label("Also offer links from:");
+                        ui.text_edit_singleline(&mut self.clipboard_extra_hosts)
+                            .on_hover_text("Extra hosts, e.g. bilibili.com, nicovideo.jp");
+                    });
+                }
+                ui.add_space(8.0);
                 ui.heading("Tools");
                 ui.label(
                     "MediaKit bundles its own ffmpeg/ffprobe/yt-dlp, extracted here on \
@@ -3063,6 +3098,67 @@ impl MediaKitApp {
                 ui.label("  ");
                 ui.label(msg);
             });
+        }
+    }
+
+    /// Start/stop/restart the background clipboard poller to match the
+    /// Settings toggle and host list, and collect any new offers.
+    fn update_clipboard_watcher(&mut self, ctx: &egui::Context) {
+        let hosts_changed = self.clipboard_hosts_applied != self.clipboard_extra_hosts;
+        if !self.clipboard_watch_enabled {
+            self.clipboard_watcher.stop();
+            self.clipboard_offer = None;
+            return;
+        }
+        if self.clipboard_watcher.is_running() && hosts_changed {
+            self.clipboard_watcher.stop();
+        }
+        if !self.clipboard_watcher.is_running() {
+            self.clipboard_hosts_applied = self.clipboard_extra_hosts.clone();
+            self.clipboard_watcher
+                .start(clipboard_watch::parse_host_list(
+                    &self.clipboard_extra_hosts,
+                ));
+        }
+        for url in self.clipboard_watcher.poll() {
+            if self.clipboard_last_offered.as_deref() != Some(url.as_str()) {
+                self.clipboard_last_offered = Some(url.clone());
+                self.clipboard_offer = Some(url);
+            }
+        }
+        // The poller thread can't wake the UI, so check back periodically.
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+    }
+
+    /// Small dismissible "Download <url>?" prompt in the bottom-right corner.
+    fn clipboard_toast(&mut self, ctx: &egui::Context) {
+        let Some(url) = self.clipboard_offer.clone() else {
+            return;
+        };
+        let mut download = false;
+        let mut dismiss = false;
+        egui::Area::new(egui::Id::new("clipboard_toast"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::RIGHT_BOTTOM, [-12.0, -40.0])
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(format!("Download {}?", clipboard_watch::shorten(&url, 48)))
+                        .on_hover_text(&url);
+                    ui.horizontal(|ui| {
+                        download = ui.button("Download").clicked();
+                        dismiss = ui.button("Dismiss").clicked();
+                    });
+                });
+            });
+        if download {
+            self.active_tab = AppTab::Download;
+            self.download_url_input = url;
+            if self.download_responsibility_acknowledged && self.ytdlp_path().is_some() {
+                self.fetch_download_urls(true);
+            }
+        }
+        if download || dismiss {
+            self.clipboard_offer = None;
         }
     }
 
@@ -3342,6 +3438,7 @@ impl eframe::App for MediaKitApp {
         self.maybe_start_auto_update_check();
         self.handle_dropped_files(&ctx);
         self.handle_global_paste(&ctx);
+        self.update_clipboard_watcher(&ctx);
         self.handle_shortcuts(&ctx);
 
         let screen = ctx.input(|i| i.viewport_rect());
@@ -3355,6 +3452,7 @@ impl eframe::App for MediaKitApp {
         self.settings_window(&ctx);
         self.presets_editor_window(&ctx);
         self.download_log_window(&ctx);
+        self.clipboard_toast(&ctx);
 
         let still_working = self
             .items

@@ -4,6 +4,7 @@
 
 mod app;
 mod cli;
+mod clipboard_watch;
 mod download_queue;
 mod encode_config;
 mod error_hint;
