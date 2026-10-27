@@ -1248,6 +1248,7 @@ impl MediaKitApp {
     }
 
     fn download_cards_ui(&mut self, ui: &mut egui::Ui) {
+        let node_found = mediakit_core::pot_provider::node_available_if_known() == Some(true);
         let mut to_remove_card: Option<usize> = None;
         let mut card_fix: Option<(usize, FixAction)> = None;
         let mut to_queue: Vec<(String, String)> = Vec::new();
@@ -1265,7 +1266,7 @@ impl MediaKitApp {
                         ui.label("Fetching metadata\u{2026}");
                     }
                     DownloadCardState::Error(e) => {
-                        if let Some(action) = error_hint::show(ui, e) {
+                        if let Some(action) = error_hint::show(ui, e, node_found) {
                             card_fix = Some((idx, action));
                         }
                         egui::CollapsingHeader::new("Details")
@@ -1486,6 +1487,7 @@ impl MediaKitApp {
     }
 
     fn download_queue_ui(&mut self, ui: &mut egui::Ui) {
+        let node_found = mediakit_core::pot_provider::node_available_if_known() == Some(true);
         if self.download_items.is_empty() {
             return;
         }
@@ -1537,10 +1539,13 @@ impl MediaKitApp {
                                     ui.colored_label(egui::Color32::from_rgb(80, 180, 100), "done");
                                 }
                                 DownloadQueueStatus::Failed(err) => {
-                                    let (sentence, action) =
-                                        error_hint::hint(downloader::classify_ytdlp_error(
-                                            &format!("{err}\n{}", item.log),
-                                        ));
+                                    let (sentence, action) = error_hint::hint(
+                                        downloader::classify_ytdlp_error(&format!(
+                                            "{err}\n{}",
+                                            item.log
+                                        )),
+                                        node_found,
+                                    );
                                     fix_action = Some((item.id, action));
                                     ui.vertical(|ui| {
                                         ui.set_max_width(260.0);

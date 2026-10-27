@@ -25,9 +25,15 @@ impl FixAction {
     }
 }
 
-/// One-sentence explanation and the matching fix for `kind`.
-pub fn hint(kind: YtdlpErrorKind) -> (&'static str, FixAction) {
+/// One-sentence explanation and the matching fix for `kind`. `node_found`
+/// matters for JS-runtime failures: telling someone who already has Node to
+/// install it is a dead end - then the stale yt-dlp is the fixable part.
+pub fn hint(kind: YtdlpErrorKind, node_found: bool) -> (&'static str, FixAction) {
     match kind {
+        YtdlpErrorKind::JsRuntime if node_found => (
+            "YouTube's video link couldn't be unscrambled. Node.js is installed, so an out-of-date yt-dlp is the likely cause.",
+            FixAction::UpdateYtdlp,
+        ),
         YtdlpErrorKind::BotCheck => (
             "YouTube wants proof you're not a bot. Using your browser's login cookies usually fixes this.",
             FixAction::UseCookies,
@@ -65,8 +71,8 @@ pub fn hint(kind: YtdlpErrorKind) -> (&'static str, FixAction) {
 
 /// Render the sentence and fix button for a failure whose text is `raw`
 /// (stderr or an error string embedding it). Returns the clicked action.
-pub fn show(ui: &mut egui::Ui, raw: &str) -> Option<FixAction> {
-    let (sentence, action) = hint(classify_ytdlp_error(raw));
+pub fn show(ui: &mut egui::Ui, raw: &str, node_found: bool) -> Option<FixAction> {
+    let (sentence, action) = hint(classify_ytdlp_error(raw), node_found);
     let mut clicked = None;
     ui.vertical(|ui| {
         ui.colored_label(egui::Color32::from_rgb(220, 90, 90), sentence);
@@ -99,15 +105,28 @@ mod tests {
             Network,
             Unknown,
         ] {
-            let (sentence, _) = hint(kind);
-            assert!(!sentence.is_empty());
+            for node in [false, true] {
+                let (sentence, _) = hint(kind, node);
+                assert!(!sentence.is_empty());
+            }
         }
     }
 
     #[test]
     fn bot_check_offers_cookies_and_403_offers_update() {
-        assert_eq!(hint(YtdlpErrorKind::BotCheck).1, FixAction::UseCookies);
-        assert_eq!(hint(YtdlpErrorKind::Http403).1, FixAction::UpdateYtdlp);
-        assert_eq!(hint(YtdlpErrorKind::JsRuntime).1, FixAction::InstallNode);
+        assert_eq!(hint(YtdlpErrorKind::BotCheck, true).1, FixAction::UseCookies);
+        assert_eq!(hint(YtdlpErrorKind::Http403, true).1, FixAction::UpdateYtdlp);
+    }
+
+    #[test]
+    fn js_runtime_failures_only_suggest_node_when_it_is_missing() {
+        assert_eq!(
+            hint(YtdlpErrorKind::JsRuntime, false).1,
+            FixAction::InstallNode
+        );
+        assert_eq!(
+            hint(YtdlpErrorKind::JsRuntime, true).1,
+            FixAction::UpdateYtdlp
+        );
     }
 }

@@ -240,8 +240,11 @@ pub fn classify_ytdlp_error(stderr: &str) -> YtdlpErrorKind {
         "js runtime",
         "no supported javascript",
         "only images are available",
-        "requested format is not available",
-    ]) {
+    ]) || (s.contains("[youtube]") && s.contains("requested format is not available"))
+    {
+        // "Requested format is not available" on YouTube is almost always
+        // the signature/n-challenge step failing (so only storyboards are
+        // left); on other sites it's a real format-selection problem.
         YtdlpErrorKind::JsRuntime
     } else if has(&["http error 403", "403: forbidden", "403 forbidden"]) {
         YtdlpErrorKind::Http403
@@ -263,13 +266,17 @@ pub fn classify_ytdlp_error(stderr: &str) -> YtdlpErrorKind {
         "video is not available",
         "has been terminated",
         "this video is no longer available",
-        "does not exist",
+        "video does not exist",
+        "playlist does not exist",
+        "channel does not exist",
     ]) {
         YtdlpErrorKind::Unavailable
     } else if has(&["unsupported url", "is not a valid url"]) {
         YtdlpErrorKind::UnsupportedUrl
     } else if has(&[
-        "unable to download",
+        // Not a bare "unable to download": yt-dlp prefixes HTTP 404/429/5xx
+        // and plenty of non-network failures with it too.
+        "urlopen error",
         "name or service not known",
         "temporary failure in name resolution",
         "connection reset",
@@ -279,6 +286,8 @@ pub fn classify_ytdlp_error(stderr: &str) -> YtdlpErrorKind {
         "getaddrinfo failed",
         "failed to resolve",
         "transporterror",
+        "remote end closed connection",
+        "connection aborted",
     ]) {
         YtdlpErrorKind::Network
     } else {
@@ -750,6 +759,26 @@ mod tests {
             (
                 "ERROR: [generic] Unable to download webpage: <urlopen error [Errno -2] Name or service not known>",
                 Network,
+            ),
+            (
+                "ERROR: [youtube] abc: Requested format is not available. Use --list-formats for a list of available formats",
+                JsRuntime,
+            ),
+            (
+                "ERROR: [vimeo] 123: Requested format is not available. Use --list-formats",
+                Unknown,
+            ),
+            // A local path problem is not an unavailable video...
+            ("ERROR: cookies file /home/me/cookies.txt does not exist", Unknown),
+            // ...and an HTTP 404 is not a network failure.
+            ("ERROR: Unable to download webpage: HTTP Error 404: Not Found", Unknown),
+            (
+                "ERROR: Unable to download webpage: <urlopen error [Errno 110] Connection timed out>",
+                Network,
+            ),
+            (
+                "ERROR: [youtube] abc: Unable to download API page: HTTP Error 403: Forbidden",
+                Http403,
             ),
             ("something entirely unexpected", Unknown),
             ("", Unknown),
