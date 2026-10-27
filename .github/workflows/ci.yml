@@ -328,6 +328,9 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           for f in mediakit-*.tar.gz mediakit-*.zip mediakit-*.AppImage mediakit.exe; do
+            # nullglob only drops unmatched *patterns*; the literal
+            # `mediakit.exe` survives it on Linux, where it doesn't exist.
+            [ -e "$f" ] || continue
             sha256sum "$f" > "$f.sha256"
           done
           cat -- *.sha256
