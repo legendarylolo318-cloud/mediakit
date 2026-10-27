@@ -2371,9 +2371,9 @@ impl MediaKitApp {
             }
             ui.label(format!(
                 "Selected: {} ({} -> {})",
-                format::duration((end - start).max(0.0)),
-                format::duration(start),
-                format::duration(end)
+                format::clock(end - start),
+                format::clock(start),
+                format::clock(end)
             ));
         }
         ui.horizontal(|ui| {
@@ -2501,7 +2501,13 @@ impl MediaKitApp {
         ui.separator();
         self.primary_controls(ui);
         ui.separator();
-        self.advanced_panel(ui);
+        // Opened, Advanced is taller than most windows; cap it so the queue
+        // below always stays on screen.
+        egui::ScrollArea::vertical()
+            .id_salt("advanced_scroll")
+            .max_height((ui.available_height() * 0.5).max(120.0))
+            .auto_shrink([false, true])
+            .show(ui, |ui| self.advanced_panel(ui));
         ui.separator();
         self.output_settings_row(ui);
         ui.separator();
@@ -2648,10 +2654,18 @@ impl MediaKitApp {
                             if !item.log.is_empty() && ui.small_button("Show log").clicked() {
                                 to_show_log = Some(item.id);
                             }
-                            if ui.small_button("\u{2191}").clicked() {
+                            if ui
+                                .small_button("\u{2B06}")
+                                .on_hover_text("Move up")
+                                .clicked()
+                            {
                                 to_move_up = Some(idx);
                             }
-                            if ui.small_button("\u{2193}").clicked() {
+                            if ui
+                                .small_button("\u{2B07}")
+                                .on_hover_text("Move down")
+                                .clicked()
+                            {
                                 to_move_down = Some(idx);
                             }
                             if ui.small_button("\u{2716}").clicked() {
@@ -2882,10 +2896,20 @@ impl MediaKitApp {
                                 changed = true;
                             }
                             ui.horizontal(|ui| {
-                                if ui.small_button("\u{2191}").clicked() && i > 0 {
+                                if ui
+                                    .small_button("\u{2B06}")
+                                    .on_hover_text("Move up")
+                                    .clicked()
+                                    && i > 0
+                                {
                                     to_move_up = Some(i);
                                 }
-                                if ui.small_button("\u{2193}").clicked() && i + 1 < len {
+                                if ui
+                                    .small_button("\u{2B07}")
+                                    .on_hover_text("Move down")
+                                    .clicked()
+                                    && i + 1 < len
+                                {
                                     to_move_down = Some(i);
                                 }
                             });

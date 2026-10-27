@@ -4,7 +4,7 @@ All notable changes to MediaKit are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); versions match the
 tags on the [Releases](../../releases) page.
 
-## [Unreleased]
+## [0.2.0] - 2026-10-26
 
 ### Fixed
 - **YouTube downloads**: `--js-runtimes node` is now attached to every YouTube
@@ -17,6 +17,20 @@ tags on the [Releases](../../releases) page.
   (`player_client=default,mweb`) instead of replacing them.
 - Re-pinned the bundled ffmpeg to the current BtbN autobuild (8.1.3) after the
   previous tag was pruned upstream and builds 404'd.
+- "Open folder" no longer freezes the window while the file manager starts
+  (Linux), and Copy file's path-as-text fallback no longer loses the clipboard
+  immediately on X11/Wayland.
+- A copied link is never offered by the clipboard watcher after it has been
+  pasted or downloaded another way.
+- The trim timeline's thumbnails fill in on their own, and both handles stay
+  grabbable when they meet.
+- yt-dlp error hints no longer suggest installing Node.js when it's already
+  installed, and no longer mislabel missing local files, HTTP 404s or
+  non-YouTube format errors.
+- The status dot shows yellow when Node.js or yt-dlp is missing, even with the
+  PO-token server disabled.
+- Settings files from older versions that lack a field now load instead of
+  silently resetting to defaults.
 
 ### Changed
 - Bundled yt-dlp bumped to 2026.10.26 (checksums from the release's own
