@@ -61,4 +61,4 @@ toml.workspace = true
 ureq = "3.3.0"
 xz2 = "0.1.7"
 zip = "8.6.0"
-zstd = "0.13.3"
+zstd = { version = "0.13.3", features = ["zstdmt"] }

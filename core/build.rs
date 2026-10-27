@@ -180,8 +180,26 @@ fn vendor_cache_root() -> PathBuf {
     Path::new(&home).join(".cargo").join("mediakit-vendor")
 }
 
+/// Level 19 over ~200 MB of binaries is by far the slowest part of a bundled
+/// build, so it uses zstd's worker threads - as many as cargo gave this build
+/// (`NUM_JOBS`, which follows `-j`) - instead of a single core.
 fn write_compressed(path: &Path, data: &[u8]) {
-    let compressed = zstd::encode_all(data, 19).expect("zstd compress vendored binary");
+    let workers = std::env::var("NUM_JOBS")
+        .ok()
+        .and_then(|n| n.parse::<u32>().ok())
+        .or_else(|| {
+            std::thread::available_parallelism()
+                .ok()
+                .map(|n| n.get() as u32)
+        })
+        .unwrap_or(1);
+    let mut encoder =
+        zstd::Encoder::new(Vec::with_capacity(data.len() / 3), 19).expect("zstd encoder");
+    encoder
+        .multithread(workers)
+        .expect("enable zstd worker threads");
+    std::io::Write::write_all(&mut encoder, data).expect("zstd compress vendored binary");
+    let compressed = encoder.finish().expect("finish zstd stream");
     fs::write(path, compressed).expect("write compressed vendored binary");
 }
 
@@ -370,11 +388,7 @@ fn extract_ffmpeg(archive_bytes: &[u8], entry: &VendorEntry) -> (Vec<u8>, Vec<u8
         .expect("ffmpeg entry missing ffprobe_path_in_archive");
 
     match entry.archive_kind.as_str() {
-        "tar_xz" => {
-            let ffmpeg = extract_from_tar_xz(archive_bytes, ffmpeg_path);
-            let ffprobe = extract_from_tar_xz(archive_bytes, ffprobe_path);
-            (ffmpeg, ffprobe)
-        }
+        "tar_xz" => extract_pair_from_tar_xz(archive_bytes, ffmpeg_path, ffprobe_path),
         "zip" => {
             let ffmpeg = extract_from_zip(archive_bytes, ffmpeg_path);
             let ffprobe = extract_from_zip(archive_bytes, ffprobe_path);
@@ -384,9 +398,16 @@ fn extract_ffmpeg(archive_bytes: &[u8], entry: &VendorEntry) -> (Vec<u8>, Vec<u8
     }
 }
 
-fn extract_from_tar_xz(archive_bytes: &[u8], entry_path: &str) -> Vec<u8> {
+/// Both binaries in one pass: xz decompression is single-threaded and slow,
+/// so walking the archive once per binary doubled it.
+fn extract_pair_from_tar_xz(
+    archive_bytes: &[u8],
+    first_path: &str,
+    second_path: &str,
+) -> (Vec<u8>, Vec<u8>) {
     let decompressed = xz2::read::XzDecoder::new(archive_bytes);
     let mut archive = tar::Archive::new(decompressed);
+    let (mut first, mut second) = (None, None);
     for file in archive.entries().expect("read tar entries") {
         let mut file = file.expect("read tar entry");
         let path = file
@@ -394,13 +415,25 @@ fn extract_from_tar_xz(archive_bytes: &[u8], entry_path: &str) -> Vec<u8> {
             .expect("tar entry path")
             .to_string_lossy()
             .into_owned();
-        if path == entry_path {
-            let mut buf = Vec::new();
-            file.read_to_end(&mut buf).expect("read tar entry contents");
-            return buf;
+        let slot = if path == first_path {
+            &mut first
+        } else if path == second_path {
+            &mut second
+        } else {
+            continue;
+        };
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).expect("read tar entry contents");
+        *slot = Some(buf);
+        if first.is_some() && second.is_some() {
+            break;
         }
     }
-    panic!("archive did not contain expected entry {entry_path:?}");
+    let missing = |p: &str| panic!("archive did not contain expected entry {p:?}");
+    (
+        first.unwrap_or_else(|| missing(first_path)),
+        second.unwrap_or_else(|| missing(second_path)),
+    )
 }
 
 fn extract_from_zip(archive_bytes: &[u8], entry_path: &str) -> Vec<u8> {
