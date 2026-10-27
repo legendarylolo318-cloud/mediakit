@@ -4,6 +4,15 @@ All notable changes to MediaKit are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); versions match the
 tags on the [Releases](../../releases) page.
 
+## [0.2.1] - 2026-10-27
+
+### Fixed
+- Settings and option rows on the Convert and Download tabs now wrap onto the
+  next line instead of running off the right edge of the window on smaller or
+  high-DPI (scaled) screens - most visibly the PO-token server's "Port:" field.
+- Linux release builds publish the tarball and AppImage again (the checksum
+  step no longer fails looking for a Windows-only `mediakit.exe`).
+
 ## [0.2.0] - 2026-10-26
 
 ### Fixed

@@ -1357,7 +1357,7 @@ impl MediaKitApp {
     }
 
     fn download_output_dir_row(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Save to:");
             ui.label(self.download_output_dir.to_string_lossy());
             if ui.button("Browse\u{2026}").clicked() {
@@ -1377,17 +1377,17 @@ impl MediaKitApp {
             .default_open(false)
             .open(force_open)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("Custom format selector:")
                         .on_hover_text("Used when Format is set to Custom (yt-dlp -f syntax)");
                     ui.text_edit_singleline(&mut self.download_custom_format);
                 });
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.checkbox(&mut self.download_embed_thumbnail, "Embed thumbnail");
                     ui.checkbox(&mut self.download_embed_metadata, "Embed metadata");
                     ui.checkbox(&mut self.download_sponsorblock, "SponsorBlock remove");
                 });
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.checkbox(&mut self.download_subtitles, "Subtitles");
                     if self.download_subtitles {
                         ui.label("Languages:");
@@ -1395,13 +1395,13 @@ impl MediaKitApp {
                         ui.checkbox(&mut self.download_auto_subs, "Auto-generated");
                     }
                 });
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("Rate limit (KB/s):");
                     ui.text_edit_singleline(&mut self.download_rate_limit_kbps);
                     ui.label("Concurrent fragments:");
                     ui.text_edit_singleline(&mut self.download_concurrent_fragments);
                 });
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("Filename template:");
                     ui.text_edit_singleline(&mut self.download_filename_template);
                 });
@@ -1411,7 +1411,7 @@ impl MediaKitApp {
     }
 
     fn cookie_options_ui(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Login cookies:");
             egui::ComboBox::new("cookie_choice_combo", "")
                 .selected_text(match self.cookie_choice {
@@ -2017,7 +2017,7 @@ impl MediaKitApp {
     }
 
     fn video_controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Container:");
             egui::ComboBox::new("container_combo", "")
                 .selected_text(self.config.container.extension())
@@ -2040,7 +2040,7 @@ impl MediaKitApp {
                     }
                 });
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("CRF (quality):");
             ui.add(egui::Slider::new(&mut self.config.crf, 0..=51));
             ui.label("Speed preset:");
@@ -2063,7 +2063,7 @@ impl MediaKitApp {
                 });
         });
         self.resolution_controls(ui);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("FPS:");
             let mut fps_enabled = self.config.fps.is_some();
             if ui.checkbox(&mut fps_enabled, "").changed() {
@@ -2078,7 +2078,7 @@ impl MediaKitApp {
     }
 
     fn resolution_controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Width:");
             let mut w = self.config.width.unwrap_or(0);
             if ui
@@ -2100,7 +2100,7 @@ impl MediaKitApp {
     }
 
     fn audio_controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Audio codec:");
             egui::ComboBox::new("audio_codec_combo", "")
                 .selected_text(audio_codec_label(self.config.audio_codec))
@@ -2116,7 +2116,7 @@ impl MediaKitApp {
 
     fn target_size_controls(&mut self, ui: &mut egui::Ui) {
         let safety_margin = self.size_presets.safety_margin_fraction();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Target:");
             egui::ComboBox::new("target_size_combo", "")
                 .selected_text(self.config.target_size_choice.label().to_string())
@@ -2174,7 +2174,7 @@ impl MediaKitApp {
         if available.is_empty() {
             return;
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Hardware acceleration:");
             let selected_text = self
                 .config
@@ -2202,7 +2202,7 @@ impl MediaKitApp {
     }
 
     fn gif_controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("FPS:");
             ui.add(egui::DragValue::new(&mut self.config.gif_fps).range(1..=60));
             ui.label("Width:");
@@ -2212,7 +2212,7 @@ impl MediaKitApp {
     }
 
     fn image_to_gif_controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Duration (s):");
             ui.add(
                 egui::DragValue::new(&mut self.config.image_gif_duration_seconds)
@@ -2228,7 +2228,7 @@ impl MediaKitApp {
     }
 
     fn gif_to_video_controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Container:");
             egui::ComboBox::new("gif_container_combo", "")
                 .selected_text(self.config.gif_to_video_container.extension())
@@ -2257,7 +2257,7 @@ impl MediaKitApp {
     }
 
     fn extract_audio_controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Format:");
             egui::ComboBox::new("extract_audio_combo", "")
                 .selected_text(audio_codec_label(self.config.extract_audio_codec))
@@ -2283,7 +2283,7 @@ impl MediaKitApp {
     }
 
     fn convert_image_controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Format:");
             egui::ComboBox::new("image_format_combo", "")
                 .selected_text(image_format_label(self.config.image_format))
@@ -2309,7 +2309,7 @@ impl MediaKitApp {
     }
 
     fn rotate_flip_controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Rotate:");
             egui::ComboBox::new("rotation_combo", "")
                 .selected_text(rotation_label(self.config.rotation))
@@ -2340,7 +2340,7 @@ impl MediaKitApp {
     }
 
     fn speed_controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Speed factor:");
             ui.add(egui::Slider::new(&mut self.config.speed_factor, 0.25..=4.0).logarithmic(true));
         });
@@ -2386,7 +2386,7 @@ impl MediaKitApp {
                 format::clock(end)
             ));
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Trim start (s):");
             let mut start = self.config.trim_start_seconds.unwrap_or(0.0);
             if ui
@@ -2490,11 +2490,13 @@ impl MediaKitApp {
                  if that's missing, YouTube downloads still work, just without this. Starts \
                  lazily on the first YouTube URL, never touches your system yt-dlp/PATH/config.",
             );
+            // Added straight to the wrapped row, not via a nested
+            // `ui.horizontal`: a nested group's width isn't known up front,
+            // so the row can't wrap it and it ran off the window's right
+            // edge on narrower / high-DPI screens.
             if self.pot_config.enabled {
-                ui.horizontal(|ui| {
-                    ui.label("Port:");
-                    ui.add(egui::DragValue::new(&mut self.pot_config.port).range(1..=65535));
-                });
+                ui.label("Port:");
+                ui.add(egui::DragValue::new(&mut self.pot_config.port).range(1..=65535));
             }
         });
     }
