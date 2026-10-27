@@ -1088,21 +1088,25 @@ impl MediaKitApp {
         // off the GUI thread via `DownloadEngine::handle()`, so the queue
         // item just shows "queued" a little longer on a cold start.
         if mediakit_core::pot_provider::is_youtube_url(&url) {
-            if let Some((manager, config, app_data_dir)) = self.pot_context() {
-                let handle = engine.handle();
-                std::thread::spawn(move || {
-                    let mut spec = spec;
-                    spec.options.extra_args = mediakit_core::pot_provider::prepare_youtube_args(
-                        &spec.url,
-                        &manager,
-                        config,
-                        &app_data_dir,
-                        mediakit_core::pot_provider::DEFAULT_WAIT_BUDGET,
-                    );
-                    handle.submit(spec);
-                });
-                return;
-            }
+            let pot = self.pot_context();
+            let handle = engine.handle();
+            std::thread::spawn(move || {
+                let mut spec = spec;
+                spec.options.extra_args = match pot {
+                    Some((manager, config, app_data_dir)) => {
+                        mediakit_core::pot_provider::prepare_youtube_args(
+                            &spec.url,
+                            &manager,
+                            config,
+                            &app_data_dir,
+                            mediakit_core::pot_provider::DEFAULT_WAIT_BUDGET,
+                        )
+                    }
+                    None => mediakit_core::pot_provider::base_args_for_url(&spec.url),
+                };
+                handle.submit(spec);
+            });
+            return;
         }
 
         engine.submit(spec);

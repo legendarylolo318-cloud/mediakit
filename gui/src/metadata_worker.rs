@@ -25,7 +25,7 @@ impl MetadataWorker {
     /// `pot` carries what the YouTube arg helper needs (manager, config, app
     /// data dir); the helper runs here on the worker thread so a cold
     /// PO-token server start never blocks the UI. `None` (no app data dir)
-    /// means no extra args.
+    /// means no PO token, but YouTube still gets its JS runtime.
     pub fn submit(
         &self,
         ytdlp: PathBuf,
@@ -43,7 +43,7 @@ impl MetadataWorker {
                     dir,
                     pot_provider::DEFAULT_WAIT_BUDGET,
                 ),
-                None => Vec::new(),
+                None => pot_provider::base_args_for_url(&url),
             };
             let result = downloader::fetch_metadata(&ytdlp, &url, cookies.as_ref(), &extra_args)
                 .map_err(|e| e.to_string());

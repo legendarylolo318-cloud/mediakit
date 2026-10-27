@@ -317,6 +317,17 @@ pub fn prepare_youtube_args(
     youtube_extra_args(node, pot)
 }
 
+/// Blocking (probes Node once): the args for `url` when no PO-token server
+/// can be used at all, e.g. the app data dir is unavailable. YouTube still
+/// gets its JS runtime.
+pub fn base_args_for_url(url: &str) -> Vec<String> {
+    if is_youtube_url(url) {
+        youtube_base_args(node_available_cached())
+    } else {
+        Vec::new()
+    }
+}
+
 /// `node --version`'s major version number, or `None` if `node` isn't on
 /// `PATH` (or didn't run/parse cleanly) - never touches mediakit's own
 /// vendored/bundled tools, since Node is not one of them.
