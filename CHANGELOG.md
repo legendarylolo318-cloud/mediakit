@@ -6,6 +6,46 @@ tags on the [Releases](../../releases) page.
 
 ## [Unreleased]
 
+### Fixed
+- **YouTube downloads**: `--js-runtimes node` is now attached to every YouTube
+  call whenever Node is installed - including Fetch, which previously passed no
+  YouTube args at all, and downloads where the PO-token server is disabled,
+  failed or timed out. Fetch and download share one helper
+  (`pot_provider::prepare_youtube_args`) that starts the server, waits off the
+  GUI thread, and builds the args; the Node probe is cached.
+- The `mweb` client is now added on top of yt-dlp's default clients
+  (`player_client=default,mweb`) instead of replacing them.
+- Re-pinned the bundled ffmpeg to the current BtbN autobuild (8.1.3) after the
+  previous tag was pruned upstream and builds 404'd.
+
+### Changed
+- Bundled yt-dlp bumped to 2026.10.26 (checksums from the release's own
+  `SHA2-256SUMS`). The launch-time update check now runs at most once per 24 h
+  (was weekly) and is on by default for new installs.
+- Top bar slimmed to Convert/Download tabs, Add Files, Convert All and Settings;
+  Presets, Licenses, Clear queue and Cancel all moved into a `⋯` menu
+  (shortcuts unchanged). The theme picker moved to Settings → Appearance.
+- The separate ffmpeg and PO-token labels are replaced by a single status dot.
+- Convert tab: preset cards first, then only the selected preset's controls;
+  everything else is in a collapsed, remembered Advanced section.
+- Download tab: one paste box, Format and "Then:" dropdowns, and a single
+  Download button that fetches and queues single videos in one step. Cookies,
+  subtitles, SponsorBlock, embeds, rate limit, fragments, filename template and
+  the raw format selector are under a collapsed Options section.
+- "Open folder" now selects the finished file where the platform supports it.
+
+### Added
+- yt-dlp error classification (`downloader::classify_ytdlp_error`) with a plain
+  sentence and a matching fix button on failed fetches and downloads.
+- Paste a link or file path anywhere in the window.
+- Optional clipboard watcher ("Offer to download links I copy") with a
+  user-editable extra host list.
+- Visual trim timeline with thumbnail frames and draggable handles.
+- Desktop notifications when a job or batch finishes (Settings toggle, on by
+  default) and a **Copy file** button on finished rows (`text/uri-list` via
+  `wl-copy`/`xclip` on Linux, `CF_HDROP` on Windows, path-as-text otherwise).
+- Download filename template option.
+
 ## [0.1.2] - 2026-08-25
 
 ### Added

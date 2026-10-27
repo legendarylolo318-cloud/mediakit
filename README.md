@@ -31,7 +31,7 @@ Built with Rust + [egui](https://github.com/emilk/egui) for the GUI, and drives 
 - Login-required content: cookies from a browser profile or a `cookies.txt` file — MediaKit never stores credentials and redacts cookie values from any displayed/copied command
 - **Chaining**: "Download → Discord-size clip", "Download → GIF", "Download → MP3" queue as one entry; the intermediate download is cleaned up automatically once the conversion finishes
 - Self-update: check for and install newer `yt-dlp` releases from Settings → Tools (checksum-verified, with one-click rollback), plus an optional weekly auto-check
-- **YouTube PO-token helper** (optional, on by default): runs a local [bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider) server to work around YouTube's "Sign in to confirm you're not a bot" 403s. Starts lazily the first time a YouTube/`youtu.be` URL is queued, with a status indicator (stopped/starting/ready/failed) next to the ffmpeg status and a toggle in Settings. Needs a system Node.js ≥ 22 the first time it's used — if that's missing, YouTube downloads still work, just without this. Never touches your system yt-dlp install, `PATH`, or `~/.config/yt-dlp/`.
+- **YouTube PO-token helper** (optional, on by default): runs a local [bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider) server to work around YouTube's "Sign in to confirm you're not a bot" 403s. Starts lazily the first time a YouTube/`youtu.be` URL is queued, with a toggle in Settings and its state folded into the status dot in the status bar. Needs a system Node.js ≥ 22 the first time it's used — if that's missing, YouTube downloads still work, just without this. Never touches your system yt-dlp install, `PATH`, or `~/.config/yt-dlp/`.
 
 MediaKit only ever shells out to `yt-dlp` — it doesn't implement site-specific extraction itself, and it will not attempt to work around DRM. **You're responsible for complying with the terms of service and copyright law of whatever site or content you download from.**
 
@@ -39,6 +39,13 @@ MediaKit only ever shells out to `yt-dlp` — it doesn't implement site-specific
 - Drag & drop or file-picker input, multi-file selection
 - Per-item status (queued / running / done / failed / cancelled), reorder, remove, clear
 - Real percentage + ETA progress per job, parsed from ffmpeg's machine-readable progress stream
+- **Preset cards**: the Convert tab opens on large cards for the common jobs (Discord-size clip, Video → GIF, Extract MP3, Compress, Convert image) with only the controls that preset needs; every other preset lives under "More…", and codec/CRF/trim/hardware/raw args sit in a collapsed Advanced section (its open state is remembered)
+- **Paste a link anywhere**: Ctrl+V with no text field focused starts a download for pasted links, or adds pasted file paths to the Convert queue. An optional clipboard watcher (Settings, off by default) offers to download video links as you copy them
+- **One-step Download**: paste links, pick a format and an optional "Then:" conversion, press Download. Single videos queue immediately; playlists still show a checkbox list. Failures show one plain sentence with a fix button (Update yt-dlp, Use browser cookies, Install Node.js, Retry)
+- **Visual trim timeline**: single-video jobs get a thumbnail strip with draggable start/end handles, kept in sync with the trim fields
+- **When it's done**: a desktop notification per finished job or batch (Settings toggle), plus **Open folder** (selects the file) and **Copy file** (paste it straight into Discord) on every finished row
+- **Status dot**: one coloured dot in the status bar summarises ffmpeg, yt-dlp, Node.js and the PO-token server; hover for details, click for actions
+- yt-dlp is checked for updates at launch (at most once per 24 h, on by default) with the usual checksum verification and rollback
 - **Convert All**: runs the current conversion settings against every convertible file in the queue at once, bounded by the same configurable concurrency limit (default `min(4, cpu cores)`); per-file and overall progress, a "n succeeded / n failed" summary when the batch finishes, and per-file errors that don't abort the rest of the batch
 - Configurable concurrency; cancel individual jobs or the whole queue (kills in-flight ffmpeg processes, not just marks them cancelled)
 - Size-targeted jobs get a real pass/fail badge with the actual output byte count once they finish, not just "done"
