@@ -273,6 +273,9 @@ jobs:
           Copy-Item README.md dist/
           Copy-Item LICENSE dist/
           Compress-Archive -Path dist/* -DestinationPath "mediakit-${{ matrix.artifact }}.zip"
+          # Also published on its own, so there's a direct .exe download
+          # next to the portable zip.
+          Copy-Item target/release/mediakit.exe mediakit.exe
 
       # Best-effort: AppImage packaging has enough moving parts (FUSE,
       # bundled shared libs) that we don't want it to block a release if it
@@ -311,7 +314,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          for f in mediakit-*.tar.gz mediakit-*.zip mediakit-*.AppImage; do
+          for f in mediakit-*.tar.gz mediakit-*.zip mediakit-*.AppImage mediakit.exe; do
             sha256sum "$f" > "$f.sha256"
           done
           cat -- *.sha256
@@ -328,7 +331,8 @@ jobs:
             mediakit-*.tar.gz
             mediakit-*.zip
             mediakit-*.AppImage
-            mediakit-*.sha256
+            mediakit.exe
+            mediakit*.sha256
 
   # Downloads exactly what a user would get from the Releases page (draft or
   # not - `gh release download` works either way when authenticated) and
