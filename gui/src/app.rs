@@ -56,6 +56,9 @@ struct PlaylistEntryUi {
 struct DownloadCard {
     url: String,
     state: DownloadCardState,
+    /// Queue straight away once metadata arrives, if it turns out to be a
+    /// single video (the main Download button's behaviour).
+    auto_queue: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +186,7 @@ pub struct MediaKitApp {
     /// Set by the "Use browser cookies" fix button; makes the Download
     /// options section open itself on the next frame.
     open_download_options: bool,
+    download_filename_template: String,
     advanced_open: bool,
 
     download_format: FormatChoice,
@@ -339,6 +343,7 @@ impl MediaKitApp {
             download_items: Vec::new(),
             download_show_log_for: None,
             open_download_options: false,
+            download_filename_template: "%(title)s.%(ext)s".to_string(),
             advanced_open: persisted.advanced_open.unwrap_or(false),
 
             download_format: FormatChoice::Best,
@@ -723,25 +728,36 @@ impl MediaKitApp {
     }
 
     fn poll_metadata(&mut self) {
+        let mut to_queue: Vec<(String, String)> = Vec::new();
         for result in self.metadata_worker.poll() {
-            let Some(card) = self.download_cards.iter_mut().find(|c| c.url == result.url) else {
+            let Some(idx) = self.download_cards.iter().position(|c| c.url == result.url) else {
                 continue;
             };
-            card.state = match result.result {
-                Ok(Metadata::Video(meta)) => DownloadCardState::Video(meta),
-                Ok(Metadata::Playlist(playlist)) => DownloadCardState::Playlist {
-                    title: playlist.title,
-                    entries: playlist
-                        .entries
-                        .into_iter()
-                        .map(|entry| PlaylistEntryUi {
-                            entry,
-                            selected: true,
-                        })
-                        .collect(),
-                },
-                Err(e) => DownloadCardState::Error(e),
-            };
+            let card = &mut self.download_cards[idx];
+            match result.result {
+                Ok(Metadata::Video(meta)) if card.auto_queue => {
+                    to_queue.push((card.url.clone(), meta.title));
+                    self.download_cards.remove(idx);
+                }
+                Ok(Metadata::Video(meta)) => card.state = DownloadCardState::Video(meta),
+                Ok(Metadata::Playlist(playlist)) => {
+                    card.state = DownloadCardState::Playlist {
+                        title: playlist.title,
+                        entries: playlist
+                            .entries
+                            .into_iter()
+                            .map(|entry| PlaylistEntryUi {
+                                entry,
+                                selected: true,
+                            })
+                            .collect(),
+                    }
+                }
+                Err(e) => card.state = DownloadCardState::Error(e),
+            }
+        }
+        for (url, title) in to_queue {
+            self.queue_download(url, title);
         }
     }
 
@@ -837,7 +853,10 @@ impl MediaKitApp {
         }
     }
 
-    fn fetch_download_urls(&mut self) {
+    /// Fetch metadata for every URL in the paste box. With `auto_queue`,
+    /// single videos are queued as soon as their metadata arrives; playlists
+    /// always stop at the per-item checkbox list.
+    fn fetch_download_urls(&mut self, auto_queue: bool) {
         let Some(ytdlp) = self.ytdlp_path() else {
             return;
         };
@@ -856,6 +875,7 @@ impl MediaKitApp {
             self.download_cards.push(DownloadCard {
                 url,
                 state: DownloadCardState::Fetching,
+                auto_queue,
             });
         }
         self.download_url_input.clear();
@@ -870,16 +890,20 @@ impl MediaKitApp {
     }
 
     fn current_download_options(&self) -> DownloadOptions {
+        let template = match self.download_filename_template.trim() {
+            "" => "%(title)s.%(ext)s",
+            t => t,
+        };
         let output_template = if self.download_chain != ChainChoice::None {
             let _ = std::fs::create_dir_all(Self::chain_temp_dir());
             Self::chain_temp_dir()
-                .join("%(title)s.%(ext)s")
+                .join(template)
                 .to_string_lossy()
                 .into_owned()
         } else {
             let _ = std::fs::create_dir_all(&self.download_output_dir);
             self.download_output_dir
-                .join("%(title)s.%(ext)s")
+                .join(template)
                 .to_string_lossy()
                 .into_owned()
         };
@@ -1057,10 +1081,34 @@ impl MediaKitApp {
             return;
         }
 
-        self.download_output_dir_row(ui);
+        ui.add(
+            egui::TextEdit::multiline(&mut self.download_url_input)
+                .desired_rows(4)
+                .desired_width(f32::INFINITY)
+                .hint_text("Paste one or more links here (one per line)"),
+        );
         ui.horizontal(|ui| {
-            ui.label("URLs (one per line):");
-            if ui.button("Paste from clipboard").clicked() {
+            ui.label("Format:");
+            let before = self.download_format;
+            egui::ComboBox::new("download_format_combo", "")
+                .selected_text(self.download_format.label())
+                .show_ui(ui, |ui| {
+                    for choice in FormatChoice::ALL {
+                        ui.selectable_value(&mut self.download_format, choice, choice.label());
+                    }
+                });
+            if self.download_format == FormatChoice::Custom && before != FormatChoice::Custom {
+                self.open_download_options = true;
+            }
+            ui.label("Then:");
+            egui::ComboBox::new("download_chain_combo", "")
+                .selected_text(self.download_chain.label())
+                .show_ui(ui, |ui| {
+                    for choice in ChainChoice::ALL {
+                        ui.selectable_value(&mut self.download_chain, choice, choice.label());
+                    }
+                });
+            if ui.small_button("Paste from clipboard").clicked() {
                 if let Ok(mut clipboard) = arboard::Clipboard::new() {
                     if let Ok(text) = clipboard.get_text() {
                         if !self.download_url_input.is_empty()
@@ -1072,16 +1120,19 @@ impl MediaKitApp {
                     }
                 }
             }
-            if ui.button("Fetch Metadata").clicked() {
-                self.fetch_download_urls();
-            }
         });
-        ui.add(
-            egui::TextEdit::multiline(&mut self.download_url_input)
-                .desired_rows(3)
-                .desired_width(f32::INFINITY)
-                .hint_text("https://example.com/watch?v=... (one per line)"),
-        );
+        self.download_output_dir_row(ui);
+        let can_download = !self.download_url_input.trim().is_empty();
+        if ui
+            .add_enabled(
+                can_download,
+                egui::Button::new(egui::RichText::new("Download").size(18.0).strong())
+                    .min_size(egui::vec2(ui.available_width(), 44.0)),
+            )
+            .clicked()
+        {
+            self.fetch_download_urls(true);
+        }
 
         ui.separator();
         self.download_options_panel(ui);
@@ -1179,7 +1230,7 @@ impl MediaKitApp {
                 // Drop the failed card and fetch again.
                 self.download_cards.remove(idx);
                 self.download_url_input = url;
-                self.fetch_download_urls();
+                self.fetch_download_urls(true);
             } else {
                 self.apply_fix(&ui.ctx().clone(), action);
             }
@@ -1211,26 +1262,14 @@ impl MediaKitApp {
 
     fn download_options_panel(&mut self, ui: &mut egui::Ui) {
         let force_open = std::mem::take(&mut self.open_download_options).then_some(true);
-        egui::CollapsingHeader::new("Download options")
+        egui::CollapsingHeader::new("Options")
             .default_open(false)
             .open(force_open)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Format:");
-                    egui::ComboBox::new("download_format_combo", "")
-                        .selected_text(self.download_format.label())
-                        .show_ui(ui, |ui| {
-                            for choice in FormatChoice::ALL {
-                                ui.selectable_value(
-                                    &mut self.download_format,
-                                    choice,
-                                    choice.label(),
-                                );
-                            }
-                        });
-                    if self.download_format == FormatChoice::Custom {
-                        ui.text_edit_singleline(&mut self.download_custom_format);
-                    }
+                    ui.label("Custom format selector:")
+                        .on_hover_text("Used when Format is set to Custom (yt-dlp -f syntax)");
+                    ui.text_edit_singleline(&mut self.download_custom_format);
                 });
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.download_embed_thumbnail, "Embed thumbnail");
@@ -1252,18 +1291,8 @@ impl MediaKitApp {
                     ui.text_edit_singleline(&mut self.download_concurrent_fragments);
                 });
                 ui.horizontal(|ui| {
-                    ui.label("After download:");
-                    egui::ComboBox::new("download_chain_combo", "")
-                        .selected_text(self.download_chain.label())
-                        .show_ui(ui, |ui| {
-                            for choice in ChainChoice::ALL {
-                                ui.selectable_value(
-                                    &mut self.download_chain,
-                                    choice,
-                                    choice.label(),
-                                );
-                            }
-                        });
+                    ui.label("Filename template:");
+                    ui.text_edit_singleline(&mut self.download_filename_template);
                 });
                 self.cookie_options_ui(ui);
                 self.download_command_preview(ui);
