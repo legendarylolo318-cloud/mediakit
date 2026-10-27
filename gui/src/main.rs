@@ -10,6 +10,7 @@ mod error_hint;
 mod format;
 mod metadata_worker;
 mod output;
+mod preset_cards;
 mod probe_worker;
 mod queue;
 mod settings;

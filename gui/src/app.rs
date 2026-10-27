@@ -4,6 +4,7 @@ use crate::error_hint::{self, FixAction};
 use crate::format;
 use crate::metadata_worker::MetadataWorker;
 use crate::output::{OutputLocation, OutputSettings};
+use crate::preset_cards::Card;
 use crate::probe_worker::ProbeWorker;
 use crate::queue::{QueueItem, QueueStatus};
 use crate::settings::{PersistedSettings, ThemeChoice};
@@ -182,6 +183,7 @@ pub struct MediaKitApp {
     /// Set by the "Use browser cookies" fix button; makes the Download
     /// options section open itself on the next frame.
     open_download_options: bool,
+    advanced_open: bool,
 
     download_format: FormatChoice,
     download_custom_format: String,
@@ -337,6 +339,7 @@ impl MediaKitApp {
             download_items: Vec::new(),
             download_show_log_for: None,
             open_download_options: false,
+            advanced_open: persisted.advanced_open.unwrap_or(false),
 
             download_format: FormatChoice::Best,
             download_custom_format: String::new(),
@@ -405,6 +408,7 @@ impl MediaKitApp {
             override_ffprobe_path: self.override_ffprobe.clone(),
             override_ytdlp_path: self.override_ytdlp.clone(),
             ytdlp_auto_update_enabled: Some(self.ytdlp_auto_update_enabled),
+            advanced_open: Some(self.advanced_open),
             download_responsibility_acknowledged: self.download_responsibility_acknowledged,
             download_output_dir: Some(self.download_output_dir.clone()),
             pot_provider_enabled: Some(self.pot_config.enabled),
@@ -1707,81 +1711,118 @@ impl MediaKitApp {
         });
     }
 
+    /// Large clickable cards for the common jobs, then a "More\u{2026}" menu
+    /// holding every other preset so nothing is unreachable.
     fn preset_row(&mut self, ui: &mut egui::Ui) {
+        let active = Card::for_mode(self.config.mode, self.config.extract_audio_codec);
         ui.horizontal_wrapped(|ui| {
-            // Data-driven, not hardcoded: every button here comes from
-            // presets.toml (Settings -> Presets), so platform caps changing
-            // (Discord alone has moved three times) never needs a code
-            // change, just an edit to that file.
-            let safety_margin = self.size_presets.safety_margin_fraction();
-            for preset in self.size_presets.presets.clone() {
-                if ui.button(&preset.display_name).clicked() {
-                    self.config.apply_size_preset(&preset, safety_margin);
+            for card in Card::ALL {
+                let text = egui::RichText::new(format!("{}\n{}", card.name(), card.description()))
+                    .size(13.0);
+                let button = egui::Button::new(text)
+                    .selected(active == Some(card))
+                    .min_size(egui::vec2(170.0, 52.0));
+                if ui.add(button).clicked() {
+                    self.select_card(card);
                 }
             }
-            if ui.button("Video -> GIF").clicked() {
-                self.config.mode = Mode::VideoToGif;
-            }
-            if ui.button("Image -> GIF").clicked() {
-                self.config.mode = Mode::ImageToGif;
-            }
-            if ui.button("GIF -> MP4").clicked() {
-                self.config.mode = Mode::GifToVideo;
-                self.config.gif_to_video_container = Container::Mp4;
-                self.config.gif_to_video_codec = VideoCodec::H264;
-            }
-            if ui.button("Extract Audio").clicked() {
-                self.config.mode = Mode::ExtractAudio;
-            }
-            if ui.button("Convert Image").clicked() {
-                self.config.mode = Mode::ConvertImage;
-            }
-            if ui.button("Mute").clicked() {
-                self.config.mode = Mode::Mute;
-            }
-            if ui.button("Strip Metadata").clicked() {
-                self.config.mode = Mode::StripMetadata;
-            }
-            if ui.button("Rotate/Flip").clicked() {
-                self.config.mode = Mode::RotateFlip;
-            }
-            if ui.button("Reverse").clicked() {
-                self.config.mode = Mode::Reverse;
-            }
-            if ui.button("Speed").clicked() {
-                self.config.mode = Mode::SpeedChange;
-            }
+            let more_label = if active.is_none() {
+                format!("More: {}\u{2026}", self.config.mode.label())
+            } else {
+                "More\u{2026}".to_string()
+            };
+            ui.menu_button(more_label, |ui| self.more_presets_menu(ui));
         });
+    }
 
-        ui.horizontal(|ui| {
-            ui.label("Mode:");
-            egui::ComboBox::new("mode_combo", "")
-                .selected_text(self.config.mode.label())
-                .show_ui(ui, |ui| {
-                    for mode in Mode::ALL {
-                        ui.selectable_value(&mut self.config.mode, mode, mode.label());
-                    }
-                });
-        });
+    fn select_card(&mut self, card: Card) {
+        match card {
+            Card::DiscordClip => {
+                // Keep whichever size preset is already chosen; only fall
+                // back to the first configured one when nothing is.
+                let safety_margin = self.size_presets.safety_margin_fraction();
+                if matches!(
+                    self.config.target_size_choice,
+                    TargetSizeChoice::Preset { .. }
+                ) {
+                    self.config.mode = Mode::TargetSize;
+                } else if let Some(preset) = self.size_presets.presets.first().cloned() {
+                    self.config.apply_size_preset(&preset, safety_margin);
+                } else {
+                    self.config.mode = Mode::TargetSize;
+                }
+            }
+            Card::Gif => self.config.mode = Mode::VideoToGif,
+            Card::Mp3 => {
+                self.config.mode = Mode::ExtractAudio;
+                self.config.extract_audio_codec = AudioCodec::Mp3;
+            }
+            Card::Compress => self.config.mode = Mode::Video,
+            Card::Image => self.config.mode = Mode::ConvertImage,
+        }
+    }
+
+    fn more_presets_menu(&mut self, ui: &mut egui::Ui) {
+        // Data-driven, not hardcoded: every size button comes from
+        // presets.toml (Settings -> Presets), so platform caps changing
+        // (Discord alone has moved three times) never needs a code
+        // change, just an edit to that file.
+        let safety_margin = self.size_presets.safety_margin_fraction();
+        for preset in self.size_presets.presets.clone() {
+            if ui.button(&preset.display_name).clicked() {
+                self.config.apply_size_preset(&preset, safety_margin);
+                ui.close();
+            }
+        }
+        ui.separator();
+        for mode in Mode::ALL {
+            if ui
+                .selectable_label(self.config.mode == mode, mode.label())
+                .clicked()
+            {
+                self.config.mode = mode;
+                if mode == Mode::GifToVideo {
+                    self.config.gif_to_video_container = Container::Mp4;
+                    self.config.gif_to_video_codec = VideoCodec::H264;
+                }
+                ui.close();
+            }
+        }
+    }
+
+    /// The controls that matter for the selected preset, shown right under
+    /// the cards. Codec/CRF/trim/hardware/raw args live in Advanced.
+    fn primary_controls(&mut self, ui: &mut egui::Ui) {
+        match self.config.mode {
+            Mode::Video => {
+                ui.label("Re-encodes with the quality set under Advanced.");
+            }
+            Mode::TargetSize => self.target_size_controls(ui),
+            Mode::VideoToGif => self.gif_controls(ui),
+            Mode::ImageToGif => self.image_to_gif_controls(ui),
+            Mode::GifToVideo => self.gif_to_video_controls(ui),
+            Mode::ExtractAudio => self.extract_audio_controls(ui),
+            Mode::ConvertImage => self.convert_image_controls(ui),
+            Mode::RotateFlip => self.rotate_flip_controls(ui),
+            Mode::SpeedChange => self.speed_controls(ui),
+            Mode::Mute | Mode::StripMetadata | Mode::Reverse => {
+                ui.label("No additional options for this preset.");
+            }
+        }
     }
 
     fn advanced_panel(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new("Advanced")
-            .default_open(false)
+            .id_salt("convert_advanced")
+            .default_open(self.advanced_open)
             .show(ui, |ui| {
                 match self.config.mode {
                     Mode::Video => self.video_controls(ui),
-                    Mode::TargetSize => self.target_size_controls(ui),
-                    Mode::VideoToGif => self.gif_controls(ui),
-                    Mode::ImageToGif => self.image_to_gif_controls(ui),
-                    Mode::GifToVideo => self.gif_to_video_controls(ui),
-                    Mode::ExtractAudio => self.extract_audio_controls(ui),
-                    Mode::ConvertImage => self.convert_image_controls(ui),
-                    Mode::RotateFlip => self.rotate_flip_controls(ui),
-                    Mode::SpeedChange => self.speed_controls(ui),
-                    Mode::Mute | Mode::StripMetadata | Mode::Reverse => {
-                        ui.label("No additional options for this preset.");
+                    Mode::TargetSize => {
+                        self.hardware_accel_controls(ui);
+                        self.audio_controls(ui);
                     }
+                    _ => {}
                 }
 
                 // Image -> GIF's duration field above *is* its trim (via
@@ -1811,6 +1852,11 @@ impl MediaKitApp {
                 ui.separator();
                 self.command_preview(ui);
             });
+        // Remember whether it was left open (saved with the other settings).
+        let id = ui.make_persistent_id("convert_advanced");
+        if let Some(state) = egui::collapsing_header::CollapsingState::load(ui.ctx(), id) {
+            self.advanced_open = state.is_open();
+        }
     }
 
     fn video_controls(&mut self, ui: &mut egui::Ui) {
@@ -1950,8 +1996,6 @@ impl MediaKitApp {
                 ui.add(egui::DragValue::new(&mut self.config.custom_target_mib).range(1..=200_000));
             }
         });
-        self.hardware_accel_controls(ui);
-        self.audio_controls(ui);
     }
 
     /// Hardware encoder picker for whichever [`VideoCodec`] is currently
@@ -2268,6 +2312,8 @@ impl MediaKitApp {
 
     fn convert_tab_ui(&mut self, ui: &mut egui::Ui) {
         self.preset_row(ui);
+        ui.separator();
+        self.primary_controls(ui);
         ui.separator();
         self.advanced_panel(ui);
         ui.separator();

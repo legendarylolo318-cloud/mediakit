@@ -80,6 +80,8 @@ pub struct PersistedSettings {
     /// Port the PO-token server listens on. `None` means "use the default"
     /// (`mediakit_core::pot_provider::DEFAULT_PORT`).
     pub pot_provider_port: Option<u16>,
+    /// Whether the Convert tab's Advanced section was left open.
+    pub advanced_open: Option<bool>,
 }
 
 fn settings_path() -> Option<PathBuf> {
