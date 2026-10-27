@@ -12,6 +12,7 @@ use crate::queue::{QueueItem, QueueStatus};
 use crate::settings::{PersistedSettings, ThemeChoice};
 use crate::status::{self, Health, StatusInputs};
 use crate::sys;
+use crate::timeline::{self, ThumbCache};
 use crate::update_worker::{UpdateOutcome, UpdateWorker};
 use eframe::egui;
 use mediakit_core::command::{AudioCodec, Container, VideoCodec};
@@ -190,6 +191,7 @@ pub struct MediaKitApp {
     open_download_options: bool,
     download_filename_template: String,
     advanced_open: bool,
+    thumb_cache: ThumbCache,
     clipboard_watcher: ClipboardWatcher,
     clipboard_watch_enabled: bool,
     clipboard_extra_hosts: String,
@@ -356,6 +358,7 @@ impl MediaKitApp {
             open_download_options: false,
             download_filename_template: "%(title)s.%(ext)s".to_string(),
             advanced_open: persisted.advanced_open.unwrap_or(false),
+            thumb_cache: ThumbCache::new(),
             clipboard_watcher: ClipboardWatcher::new(),
             clipboard_watch_enabled: persisted.clipboard_watch_enabled.unwrap_or(false),
             clipboard_extra_hosts: persisted.clipboard_extra_hosts.clone().unwrap_or_default(),
@@ -2237,7 +2240,43 @@ impl MediaKitApp {
         });
     }
 
+    /// Single-file video jobs get the thumbnail timeline; everything else
+    /// (several files selected, audio/image input, not probed yet) falls back
+    /// to the text fields alone.
+    fn timeline_target(&self) -> Option<(PathBuf, f64)> {
+        let [item] = self.items.as_slice() else {
+            return None;
+        };
+        let info = item.info.as_ref()?;
+        (info.video.is_some() && info.duration_seconds > 0.0)
+            .then(|| (item.input.clone(), info.duration_seconds))
+    }
+
     fn trim_controls(&mut self, ui: &mut egui::Ui) {
+        let target = self.timeline_target();
+        if let (Some((path, duration)), FfmpegStatus::Ready(env)) = (&target, &self.ffmpeg_status) {
+            self.thumb_cache.request(&env.ffmpeg_path, path, *duration);
+            if self.thumb_cache.poll(ui.ctx()) {
+                ui.ctx().request_repaint();
+            }
+            let start = self.config.trim_start_seconds.unwrap_or(0.0);
+            let end = self
+                .config
+                .trim_end_seconds
+                .unwrap_or(*duration)
+                .min(*duration);
+            if let Some((s, e)) = timeline::show(ui, &self.thumb_cache, path, *duration, start, end)
+            {
+                self.config.trim_start_seconds = (s > 0.0).then_some(s);
+                self.config.trim_end_seconds = (e < *duration).then_some(e);
+            }
+            ui.label(format!(
+                "Selected: {} ({} \u{2192} {})",
+                format::duration((end - start).max(0.0)),
+                format::duration(start),
+                format::duration(end)
+            ));
+        }
         ui.horizontal(|ui| {
             ui.label("Trim start (s):");
             let mut start = self.config.trim_start_seconds.unwrap_or(0.0);

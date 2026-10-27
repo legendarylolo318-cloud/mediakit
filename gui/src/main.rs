@@ -18,6 +18,7 @@ mod queue;
 mod settings;
 mod status;
 mod sys;
+mod timeline;
 mod update_worker;
 
 use app::MediaKitApp;
