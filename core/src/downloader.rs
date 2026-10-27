@@ -196,6 +196,96 @@ pub fn fetch_metadata(
     }
 }
 
+// --- Error classification ------------------------------------------------
+
+/// What went wrong, as far as yt-dlp's stderr lets us tell. Lets the UI show
+/// one plain sentence and a button that actually fixes (or retries) the
+/// problem instead of dumping a traceback on the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum YtdlpErrorKind {
+    /// "Sign in to confirm you're not a bot" - YouTube wants a logged-in
+    /// session or a PO token.
+    BotCheck,
+    /// HTTP 403 from the media server (stale extractor, expired URL, ...).
+    Http403,
+    /// No JS runtime available, or the n-challenge / signature solve failed.
+    JsRuntime,
+    /// Age-restricted or members/login-only content.
+    LoginRequired,
+    /// Private, deleted or otherwise unavailable video.
+    Unavailable,
+    UnsupportedUrl,
+    Network,
+    Unknown,
+}
+
+/// Classify yt-dlp's stderr (or an error string embedding it). Order
+/// matters: the more specific signatures are checked first, because e.g. a
+/// bot-check message also contains words found in the login-required one.
+pub fn classify_ytdlp_error(stderr: &str) -> YtdlpErrorKind {
+    let s = stderr.to_ascii_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| s.contains(n));
+
+    if has(&[
+        "confirm you\u{2019}re not a bot",
+        "confirm you're not a bot",
+    ]) {
+        YtdlpErrorKind::BotCheck
+    } else if has(&[
+        "n challenge",
+        "n-challenge",
+        "nsig extraction failed",
+        "signature extraction failed",
+        "javascript runtime",
+        "js runtime",
+        "no supported javascript",
+        "only images are available",
+        "requested format is not available",
+    ]) {
+        YtdlpErrorKind::JsRuntime
+    } else if has(&["http error 403", "403: forbidden", "403 forbidden"]) {
+        YtdlpErrorKind::Http403
+    } else if has(&[
+        "age-restricted",
+        "age restricted",
+        "confirm your age",
+        "sign in to confirm your age",
+        "login required",
+        "this video is only available for registered users",
+        "members-only",
+        "join this channel",
+    ]) {
+        YtdlpErrorKind::LoginRequired
+    } else if has(&[
+        "private video",
+        "video unavailable",
+        "this video has been removed",
+        "video is not available",
+        "has been terminated",
+        "this video is no longer available",
+        "does not exist",
+    ]) {
+        YtdlpErrorKind::Unavailable
+    } else if has(&["unsupported url", "is not a valid url"]) {
+        YtdlpErrorKind::UnsupportedUrl
+    } else if has(&[
+        "unable to download",
+        "name or service not known",
+        "temporary failure in name resolution",
+        "connection reset",
+        "connection refused",
+        "timed out",
+        "network is unreachable",
+        "getaddrinfo failed",
+        "failed to resolve",
+        "transporterror",
+    ]) {
+        YtdlpErrorKind::Network
+    } else {
+        YtdlpErrorKind::Unknown
+    }
+}
+
 // --- Download options ---------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
@@ -632,6 +722,41 @@ mod tests {
         );
         assert!(!redacted.contains(&"firefox:default-release".to_string()));
         assert!(redacted.contains(&"<redacted>".to_string()));
+    }
+
+    #[test]
+    fn classifies_real_looking_ytdlp_errors() {
+        use YtdlpErrorKind::*;
+        let cases = [
+            (
+                "ERROR: [youtube] dQw4w9WgXcQ: Sign in to confirm you\u{2019}re not a bot. Use --cookies-from-browser",
+                BotCheck,
+            ),
+            (
+                "WARNING: [youtube] n challenge solving failed: Some formats may be missing. Ensure you have a supported JavaScript runtime",
+                JsRuntime,
+            ),
+            (
+                "ERROR: unable to download video data: HTTP Error 403: Forbidden",
+                Http403,
+            ),
+            (
+                "ERROR: [youtube] abc: Sign in to confirm your age. This video may be inappropriate for some users.",
+                LoginRequired,
+            ),
+            ("ERROR: [youtube] abc: Private video. Sign in if you've been granted access", Unavailable),
+            ("ERROR: [youtube] abc: Video unavailable. This video has been removed by the uploader", Unavailable),
+            ("ERROR: Unsupported URL: https://example.com/foo", UnsupportedUrl),
+            (
+                "ERROR: [generic] Unable to download webpage: <urlopen error [Errno -2] Name or service not known>",
+                Network,
+            ),
+            ("something entirely unexpected", Unknown),
+            ("", Unknown),
+        ];
+        for (stderr, expected) in cases {
+            assert_eq!(classify_ytdlp_error(stderr), expected, "{stderr}");
+        }
     }
 
     #[test]

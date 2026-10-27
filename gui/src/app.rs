@@ -1,5 +1,6 @@
 use crate::download_queue::{DownloadQueueItem, DownloadQueueStatus};
 use crate::encode_config::{EncodeConfig, Mode, TargetSizeChoice};
+use crate::error_hint::{self, FixAction};
 use crate::format;
 use crate::metadata_worker::MetadataWorker;
 use crate::output::{OutputLocation, OutputSettings};
@@ -177,6 +178,9 @@ pub struct MediaKitApp {
     download_cards: Vec<DownloadCard>,
     download_items: Vec<DownloadQueueItem>,
     download_show_log_for: Option<JobId>,
+    /// Set by the "Use browser cookies" fix button; makes the Download
+    /// options section open itself on the next frame.
+    open_download_options: bool,
 
     download_format: FormatChoice,
     download_custom_format: String,
@@ -329,6 +333,7 @@ impl MediaKitApp {
             download_cards: Vec::new(),
             download_items: Vec::new(),
             download_show_log_for: None,
+            open_download_options: false,
 
             download_format: FormatChoice::Best,
             download_custom_format: String::new(),
@@ -976,6 +981,28 @@ impl MediaKitApp {
         engine.submit(spec);
     }
 
+    /// Carry out a non-Retry fix button. Retry needs the failed item's URL,
+    /// so each call site handles it itself.
+    fn apply_fix(&mut self, ctx: &egui::Context, action: FixAction) {
+        match action {
+            FixAction::UpdateYtdlp => {
+                if let (Ok(bin_dir), false) =
+                    (ffmpeg_env::app_data_dir(), self.ytdlp_update_in_progress)
+                {
+                    self.ytdlp_update_in_progress = true;
+                    self.ytdlp_update_message = None;
+                    self.update_worker.update(bin_dir);
+                }
+            }
+            FixAction::UseCookies => {
+                self.active_tab = AppTab::Download;
+                self.open_download_options = true;
+            }
+            FixAction::InstallNode => ctx.open_url(egui::OpenUrl::new_tab("https://nodejs.org/")),
+            FixAction::Retry => {}
+        }
+    }
+
     fn cancel_all_downloads(&mut self) {
         if let Some(engine) = &self.download_engine {
             engine.cancel_all();
@@ -1068,6 +1095,7 @@ impl MediaKitApp {
 
     fn download_cards_ui(&mut self, ui: &mut egui::Ui) {
         let mut to_remove_card: Option<usize> = None;
+        let mut card_fix: Option<(usize, FixAction)> = None;
         let mut to_queue: Vec<(String, String)> = Vec::new();
 
         for (idx, card) in self.download_cards.iter_mut().enumerate() {
@@ -1083,7 +1111,14 @@ impl MediaKitApp {
                         ui.label("Fetching metadata\u{2026}");
                     }
                     DownloadCardState::Error(e) => {
-                        ui.colored_label(egui::Color32::from_rgb(220, 90, 90), e.as_str());
+                        if let Some(action) = error_hint::show(ui, e) {
+                            card_fix = Some((idx, action));
+                        }
+                        egui::CollapsingHeader::new("Details")
+                            .id_salt(("fetch_err_details", idx))
+                            .show(ui, |ui| {
+                                ui.label(e.as_str());
+                            });
                     }
                     DownloadCardState::Video(meta) => {
                         ui.horizontal(|ui| {
@@ -1131,8 +1166,21 @@ impl MediaKitApp {
             });
         }
 
+        if let Some((idx, action)) = card_fix {
+            let url = self.download_cards[idx].url.clone();
+            if action == FixAction::Retry {
+                // Drop the failed card and fetch again.
+                self.download_cards.remove(idx);
+                self.download_url_input = url;
+                self.fetch_download_urls();
+            } else {
+                self.apply_fix(&ui.ctx().clone(), action);
+            }
+        }
         if let Some(idx) = to_remove_card {
-            self.download_cards.remove(idx);
+            if idx < self.download_cards.len() {
+                self.download_cards.remove(idx);
+            }
         }
         for (url, title) in to_queue {
             self.queue_download(url, title);
@@ -1155,8 +1203,10 @@ impl MediaKitApp {
     }
 
     fn download_options_panel(&mut self, ui: &mut egui::Ui) {
+        let force_open = std::mem::take(&mut self.open_download_options).then_some(true);
         egui::CollapsingHeader::new("Download options")
             .default_open(false)
+            .open(force_open)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Format:");
@@ -1322,6 +1372,7 @@ impl MediaKitApp {
         let mut to_cancel: Option<JobId> = None;
         let mut to_open_folder: Option<PathBuf> = None;
         let mut to_show_log: Option<JobId> = None;
+        let mut to_fix: Option<(JobId, FixAction)> = None;
 
         egui::ScrollArea::vertical()
             .id_salt("download_queue_scroll")
@@ -1338,6 +1389,7 @@ impl MediaKitApp {
                         ui.end_row();
 
                         for item in &self.download_items {
+                            let mut fix_action: Option<(JobId, FixAction)> = None;
                             ui.label(&item.title).on_hover_text(&item.url);
 
                             match &item.status {
@@ -1351,11 +1403,20 @@ impl MediaKitApp {
                                     ui.colored_label(egui::Color32::from_rgb(80, 180, 100), "done");
                                 }
                                 DownloadQueueStatus::Failed(err) => {
-                                    ui.colored_label(
-                                        egui::Color32::from_rgb(220, 90, 90),
-                                        "failed",
-                                    )
-                                    .on_hover_text(err);
+                                    let (sentence, action) =
+                                        error_hint::hint(downloader::classify_ytdlp_error(
+                                            &format!("{err}\n{}", item.log),
+                                        ));
+                                    fix_action = Some((item.id, action));
+                                    ui.vertical(|ui| {
+                                        ui.set_max_width(260.0);
+                                        ui.colored_label(
+                                            egui::Color32::from_rgb(220, 90, 90),
+                                            "failed",
+                                        )
+                                        .on_hover_text(err);
+                                        ui.small(sentence);
+                                    });
                                 }
                                 DownloadQueueStatus::Cancelled => {
                                     ui.label("cancelled");
@@ -1389,6 +1450,18 @@ impl MediaKitApp {
                                         }
                                     }
                                 }
+                                if let (DownloadQueueStatus::Failed(_), Some((_, action))) =
+                                    (&item.status, fix_action)
+                                {
+                                    if ui.small_button(action.label()).clicked() {
+                                        to_fix = Some((item.id, action));
+                                    }
+                                    if action != FixAction::Retry
+                                        && ui.small_button("Retry").clicked()
+                                    {
+                                        to_fix = Some((item.id, FixAction::Retry));
+                                    }
+                                }
                                 if !item.log.is_empty() && ui.small_button("Show log").clicked() {
                                     to_show_log = Some(item.id);
                                 }
@@ -1398,6 +1471,16 @@ impl MediaKitApp {
                     });
             });
 
+        if let Some((id, action)) = to_fix {
+            if action == FixAction::Retry {
+                if let Some(pos) = self.download_items.iter().position(|i| i.id == id) {
+                    let item = self.download_items.remove(pos);
+                    self.queue_download(item.url, item.title);
+                }
+            } else {
+                self.apply_fix(&ui.ctx().clone(), action);
+            }
+        }
         if let Some(id) = to_cancel {
             if let Some(engine) = &self.download_engine {
                 engine.cancel(id);

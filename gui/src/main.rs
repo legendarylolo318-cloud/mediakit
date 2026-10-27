@@ -6,6 +6,7 @@ mod app;
 mod cli;
 mod download_queue;
 mod encode_config;
+mod error_hint;
 mod format;
 mod metadata_worker;
 mod output;
