@@ -1751,6 +1751,11 @@ impl MediaKitApp {
     /// relevant actions.
     fn status_dot(&mut self, ui: &mut egui::Ui) {
         let inputs = self.status_inputs();
+        if inputs.node_available.is_none() {
+            // The startup Node probe can't wake the UI when it finishes.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
+        }
         let health = status::health(&inputs);
         let color = match health {
             Health::Green => egui::Color32::from_rgb(80, 180, 100),

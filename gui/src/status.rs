@@ -34,13 +34,17 @@ pub fn health(i: &StatusInputs) -> Health {
     if i.ffmpeg_version.is_none() {
         return Health::Red;
     }
+    // No yt-dlp means no downloads at all; no Node means YouTube runs
+    // without a JS runtime (and so without a PO token) - degraded whether
+    // or not the PO-token server is enabled.
+    if i.ytdlp_version.is_none() || i.node_available == Some(false) {
+        return Health::Yellow;
+    }
     if !i.pot_enabled {
         return Health::Green;
     }
     match &i.pot_state {
         PotProviderState::Starting | PotProviderState::Failed(_) => Health::Yellow,
-        // Node missing means YouTube runs without a JS runtime / PO token.
-        _ if i.node_available == Some(false) => Health::Yellow,
         PotProviderState::Ready { .. } => Health::Green,
         PotProviderState::Stopped => Health::Grey,
     }
@@ -53,7 +57,9 @@ pub fn components(i: &StatusInputs) -> Vec<Component> {
     };
     let node = match i.node_available {
         Some(true) => "found".to_string(),
-        Some(false) => "not found - YouTube works without a PO token".to_string(),
+        Some(false) => {
+            "not found - YouTube downloads may fail (no JS runtime or PO token)".to_string()
+        }
         None => "checking\u{2026}".to_string(),
     };
     let pot = if !i.pot_enabled {
@@ -115,6 +121,18 @@ mod tests {
         assert_eq!(health(&i), Health::Yellow);
         i = inputs();
         i.node_available = Some(false);
+        assert_eq!(health(&i), Health::Yellow);
+    }
+
+    #[test]
+    fn node_or_ytdlp_missing_is_yellow_even_with_the_server_disabled() {
+        let mut i = inputs();
+        i.pot_enabled = false;
+        i.node_available = Some(false);
+        assert_eq!(health(&i), Health::Yellow);
+        i = inputs();
+        i.pot_enabled = false;
+        i.ytdlp_version = None;
         assert_eq!(health(&i), Health::Yellow);
     }
 
