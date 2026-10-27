@@ -114,8 +114,14 @@ mod tests {
 
     #[test]
     fn bot_check_offers_cookies_and_403_offers_update() {
-        assert_eq!(hint(YtdlpErrorKind::BotCheck, true).1, FixAction::UseCookies);
-        assert_eq!(hint(YtdlpErrorKind::Http403, true).1, FixAction::UpdateYtdlp);
+        assert_eq!(
+            hint(YtdlpErrorKind::BotCheck, true).1,
+            FixAction::UseCookies
+        );
+        assert_eq!(
+            hint(YtdlpErrorKind::Http403, true).1,
+            FixAction::UpdateYtdlp
+        );
     }
 
     #[test]

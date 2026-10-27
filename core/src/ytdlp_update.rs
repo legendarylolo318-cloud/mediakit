@@ -276,10 +276,6 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// Days between an RFC 3339 timestamp (as GitHub returns, e.g.
-/// `"2026-07-04T10:00:00Z"`) and now. `None` if the timestamp can't be
-/// parsed. Implemented by hand (no date/time crate) since this is the only
-/// place MediaKit needs calendar math.
 /// How often the launch-time auto-check may hit the network.
 pub const AUTO_CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
 
@@ -293,6 +289,10 @@ pub fn auto_check_due(last_checked_unix: Option<u64>, now_unix: u64, interval_se
     }
 }
 
+/// Days between an RFC 3339 timestamp (as GitHub returns, e.g.
+/// `"2026-07-04T10:00:00Z"`) and now. `None` if the timestamp can't be
+/// parsed. Implemented by hand (no date/time crate) since this is the only
+/// place MediaKit needs calendar math.
 pub fn days_since(rfc3339: &str) -> Option<i64> {
     let then_unix = parse_rfc3339_unix(rfc3339)?;
     let now = now_unix() as i64;
