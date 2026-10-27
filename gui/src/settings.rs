@@ -44,7 +44,11 @@ impl ThemeChoice {
     ];
 }
 
+// `serde(default)` on the whole struct: a settings file from an older
+// version that lacks any field (not just the `Option` ones) must still load
+// rather than silently resetting everything to defaults.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
 pub struct PersistedSettings {
     pub window: WindowState,
     pub theme: ThemeChoice,
@@ -155,6 +159,37 @@ mod tests {
         save_to_path(&path, &settings);
         let loaded = load_from_path(&path);
         assert_eq!(loaded, settings);
+    }
+
+    #[test]
+    fn v0_1_2_settings_still_load() {
+        // What v0.1.2's `save` wrote (`None` fields are omitted by TOML).
+        let v012 = r#"
+ytdlp_auto_update_enabled = false
+download_responsibility_acknowledged = true
+theme = "Pink"
+concurrency = 2
+download_output_dir = "/home/me/Downloads"
+pot_provider_enabled = true
+
+[window]
+width = 1280.0
+height = 720.0
+"#;
+        let loaded: PersistedSettings = toml::from_str(v012).unwrap();
+        assert_eq!(loaded.theme, ThemeChoice::Pink);
+        assert_eq!(loaded.window.width, 1280.0);
+        assert_eq!(loaded.ytdlp_auto_update_enabled, Some(false));
+        assert!(loaded.download_responsibility_acknowledged);
+        assert_eq!(loaded.advanced_open, None);
+        assert_eq!(loaded.clipboard_watch_enabled, None);
+    }
+
+    #[test]
+    fn older_files_missing_non_optional_fields_keep_what_they_have() {
+        let loaded: PersistedSettings = toml::from_str("theme = \"Nord\"\n").unwrap();
+        assert_eq!(loaded.theme, ThemeChoice::Nord);
+        assert_eq!(loaded.window, WindowState::default());
     }
 
     #[test]
