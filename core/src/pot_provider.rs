@@ -55,6 +55,8 @@ const PROVIDER_SOURCE_SHA256: &str =
 const MIN_NODE_MAJOR: u32 = 22;
 
 pub const DEFAULT_PORT: u16 = 4416;
+/// How long a YouTube call waits for a cold PO-token server start.
+pub const DEFAULT_WAIT_BUDGET: Duration = Duration::from_secs(90);
 const READY_POLL_ATTEMPTS: u32 = 20;
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -219,29 +221,92 @@ pub fn is_youtube_url(url: &str) -> bool {
         || host.ends_with(".youtu.be")
 }
 
+/// Args every YouTube call needs regardless of PO-token state: tell yt-dlp
+/// to use Node as its external JS runtime. Current YouTube extraction needs
+/// one for the n-challenge/signature work, and yt-dlp only reaches for Node
+/// when told to - so these must not depend on the PO-token server being up.
+/// Empty when Node isn't installed (the flag would only make yt-dlp error).
+pub fn youtube_base_args(node_available: bool) -> Vec<String> {
+    if node_available {
+        vec!["--js-runtimes".to_string(), "node".to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
 /// The extra yt-dlp args needed to route a YouTube request through the
-/// running PO-token server: force the `mweb` client (the one that benefits
-/// from a PO token), point the `youtubepot-bgutilhttp` provider at our
-/// server, load the plugin from mediakit's own private directory rather
-/// than any of yt-dlp's default plugin locations, and enable the `node`
-/// JS runtime. All four flags were verified against the actual bundled
-/// yt-dlp binary's `--help`/`-v` output (`--plugin-dirs`, `--js-runtimes`,
-/// `--extractor-args` all exist; a live dry run against a real YouTube URL
-/// with these exact flags showed the plugin loading, registering
-/// `bgutil:http-1.3.2 (external)`, and correctly deriving the ping URL from
-/// `base_url`) rather than assumed from documentation alone.
-pub fn youtube_extra_args(port: u16, plugin_dir: &Path) -> Vec<String> {
+/// running PO-token server: point the `youtubepot-bgutilhttp` provider at
+/// our server and load the plugin from mediakit's own private directory
+/// rather than any of yt-dlp's default plugin locations. `mweb` is added on
+/// top of yt-dlp's default client list (`default,mweb`) rather than replacing
+/// it, because `player_client=mweb` alone throws away yt-dlp's own fallback
+/// clients and makes every video depend on that one client working.
+pub fn youtube_pot_args(port: u16, plugin_dir: &Path) -> Vec<String> {
     vec![
         "--no-plugin-dirs".to_string(),
         "--plugin-dirs".to_string(),
         plugin_dir.to_string_lossy().into_owned(),
         "--extractor-args".to_string(),
-        "youtube:player_client=mweb".to_string(),
+        "youtube:player_client=default,mweb".to_string(),
         "--extractor-args".to_string(),
         format!("youtubepot-bgutilhttp:base_url=http://127.0.0.1:{port}"),
-        "--js-runtimes".to_string(),
-        "node".to_string(),
     ]
+}
+
+/// Base args plus (only if the server is ready) the PO-token args.
+pub fn youtube_extra_args(node_available: bool, pot: Option<(u16, &Path)>) -> Vec<String> {
+    let mut args = youtube_base_args(node_available);
+    if let Some((port, plugin_dir)) = pot {
+        args.extend(youtube_pot_args(port, plugin_dir));
+    }
+    args
+}
+
+/// Cached [`detect_node_major_version`] - Node doesn't appear or vanish
+/// mid-session in practice, and this is consulted on every YouTube call, so
+/// don't spawn `node --version` each time.
+pub fn node_available_cached() -> bool {
+    static NODE: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    NODE.get_or_init(detect_node_major_version).is_some()
+}
+
+/// Blocking: build the yt-dlp extra args for `url`. Non-YouTube URLs get
+/// none. For YouTube, starts the PO-token server (if enabled; a no-op when
+/// already starting/ready), waits up to `budget` for it, then returns base
+/// args plus PO-token args if it came up Ready. A failed, disabled or
+/// too-slow server just means no PO-token args - never no JS runtime. Shared
+/// by the download path and the metadata fetch so they can't drift apart.
+/// Call from a background thread only.
+pub fn prepare_youtube_args(
+    url: &str,
+    manager: &PotProviderManager,
+    config: PotProviderConfig,
+    app_data_dir: &Path,
+    budget: Duration,
+) -> Vec<String> {
+    if !is_youtube_url(url) {
+        return Vec::new();
+    }
+    let node = node_available_cached();
+    if config.enabled {
+        manager.ensure_started(
+            config,
+            app_data_dir.to_path_buf(),
+            app_data_dir.to_path_buf(),
+        );
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            match manager.state() {
+                PotProviderState::Starting if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(300));
+                }
+                _ => break,
+            }
+        }
+    }
+    let plugin_dir = plugin_dir(app_data_dir);
+    let pot = manager.port().map(|p| (p, plugin_dir.as_path()));
+    youtube_extra_args(node, pot)
 }
 
 /// `node --version`'s major version number, or `None` if `node` isn't on
@@ -592,8 +657,17 @@ mod tests {
     }
 
     #[test]
-    fn youtube_extra_args_has_expected_flags_in_order() {
-        let args = youtube_extra_args(4416, Path::new("/data/pot-provider/plugins"));
+    fn base_args_are_js_runtime_only_when_node_present() {
+        assert_eq!(
+            youtube_base_args(true),
+            vec!["--js-runtimes".to_string(), "node".to_string()]
+        );
+        assert!(youtube_base_args(false).is_empty());
+    }
+
+    #[test]
+    fn pot_args_add_mweb_on_top_of_defaults() {
+        let args = youtube_pot_args(4416, Path::new("/data/pot-provider/plugins"));
         assert_eq!(
             args,
             vec![
@@ -601,19 +675,65 @@ mod tests {
                 "--plugin-dirs".to_string(),
                 "/data/pot-provider/plugins".to_string(),
                 "--extractor-args".to_string(),
-                "youtube:player_client=mweb".to_string(),
+                "youtube:player_client=default,mweb".to_string(),
                 "--extractor-args".to_string(),
                 "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416".to_string(),
-                "--js-runtimes".to_string(),
-                "node".to_string(),
             ]
         );
+        assert!(!args.iter().any(|a| a == "youtube:player_client=mweb"));
     }
 
     #[test]
-    fn youtube_extra_args_uses_the_given_port() {
-        let args = youtube_extra_args(9999, Path::new("/plugins"));
+    fn pot_args_use_the_given_port() {
+        let args = youtube_pot_args(9999, Path::new("/plugins"));
         assert!(args.contains(&"youtubepot-bgutilhttp:base_url=http://127.0.0.1:9999".to_string()));
+    }
+
+    #[test]
+    fn extra_args_cover_node_and_server_states() {
+        let dir = Path::new("/p");
+        let has = |a: &[String], s: &str| a.iter().any(|x| x == s);
+        // Node present, server ready: both.
+        let a = youtube_extra_args(true, Some((1, dir)));
+        assert!(has(&a, "--js-runtimes") && has(&a, "--plugin-dirs"));
+        // Node present, server failed/disabled: runtime only.
+        let a = youtube_extra_args(true, None);
+        assert!(has(&a, "--js-runtimes") && !has(&a, "--plugin-dirs"));
+        // Node missing, server ready: PO token only.
+        let a = youtube_extra_args(false, Some((1, dir)));
+        assert!(!has(&a, "--js-runtimes") && has(&a, "--plugin-dirs"));
+        // Neither.
+        assert!(youtube_extra_args(false, None).is_empty());
+    }
+
+    #[test]
+    fn prepare_args_skips_non_youtube_and_survives_disabled_server() {
+        let manager = PotProviderManager::new();
+        let disabled = PotProviderConfig {
+            enabled: false,
+            port: DEFAULT_PORT,
+        };
+        let dir = Path::new("/nonexistent");
+        assert!(prepare_youtube_args(
+            "https://vimeo.com/1",
+            &manager,
+            disabled,
+            dir,
+            Duration::ZERO
+        )
+        .is_empty());
+        let args = prepare_youtube_args(
+            "https://youtu.be/abc",
+            &manager,
+            disabled,
+            dir,
+            Duration::ZERO,
+        );
+        assert!(!args.iter().any(|a| a == "--plugin-dirs"));
+        assert_eq!(
+            args.iter().any(|a| a == "--js-runtimes"),
+            node_available_cached()
+        );
     }
 
     #[test]

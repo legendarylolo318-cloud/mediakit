@@ -126,12 +126,14 @@ pub fn fetch_metadata(
     ytdlp: &Path,
     url: &str,
     cookies: Option<&CookieSource>,
+    extra_args: &[String],
 ) -> CoreResult<Metadata> {
     let mut cmd = Command::new(ytdlp);
     cmd.args(["-J", "--flat-playlist", "--no-warnings"]);
     if let Some(cookies) = cookies {
         cookies.apply(&mut cmd);
     }
+    cmd.args(extra_args);
     cmd.arg(url);
     crate::sys::no_console_window(&mut cmd);
 

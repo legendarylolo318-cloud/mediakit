@@ -834,8 +834,12 @@ impl MediaKitApp {
             if url.is_empty() || self.download_cards.iter().any(|c| c.url == url) {
                 continue;
             }
-            self.metadata_worker
-                .submit(ytdlp.clone(), url.clone(), cookies.clone());
+            self.metadata_worker.submit(
+                ytdlp.clone(),
+                url.clone(),
+                cookies.clone(),
+                self.pot_context(),
+            );
             self.download_cards.push(DownloadCard {
                 url,
                 state: DownloadCardState::Fetching,
@@ -888,14 +892,19 @@ impl MediaKitApp {
         }
     }
 
-    /// The bound applied to how long a YouTube download's *actual submit*
-    /// is deferred while waiting for the PO-token server to become ready
-    /// (see `queue_download`). Generous on purpose - the one-time
-    /// `npm ci`/`tsc` setup on a cold cache genuinely can take the better
-    /// part of a minute on a slow connection - but finite, so a download
-    /// can never hang forever: past this, it proceeds without PO-token
-    /// args exactly like the toggle-off/Node-missing degraded path.
-    const YOUTUBE_POT_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
+    /// What background threads need to build YouTube args (see
+    /// `pot_provider::prepare_youtube_args`); `None` if the app data dir
+    /// can't be resolved.
+    fn pot_context(
+        &self,
+    ) -> Option<(
+        mediakit_core::pot_provider::PotProviderManager,
+        mediakit_core::pot_provider::PotProviderConfig,
+        PathBuf,
+    )> {
+        let dir = ffmpeg_env::app_data_dir().ok()?;
+        Some((self.pot_manager.clone(), self.pot_config, dir))
+    }
 
     fn queue_download(&mut self, url: String, title: String) {
         let Some(engine) = &self.download_engine else {
@@ -937,45 +946,26 @@ impl MediaKitApp {
             options,
         };
 
-        // Non-YouTube (or the toggle disabled) submits immediately, same as
-        // before. A YouTube URL is handed to a background thread instead of
-        // submitted directly: it starts the PO-token server (a no-op if
-        // already starting/ready) and *waits* for it - up to
-        // YOUTUBE_POT_WAIT_BUDGET - before actually submitting, so the args
-        // are attached to the very download that triggered the server
-        // start rather than only to whichever one happens to get queued
-        // after it's already warm. That wait runs entirely off the GUI
-        // thread via `DownloadEngine::handle()`, so this never blocks the
-        // UI - the queue item just shows "queued" a little longer than
-        // usual on a cold start.
-        if self.pot_config.enabled && mediakit_core::pot_provider::is_youtube_url(&url) {
-            if let Ok(app_data_dir) = ffmpeg_env::app_data_dir() {
-                let pot_manager = self.pot_manager.clone();
-                let pot_config = self.pot_config;
+        // A YouTube URL is handed to a background thread instead of
+        // submitted directly: the shared helper starts the PO-token server
+        // (a no-op if already starting/ready) and *waits* for it - up to
+        // DEFAULT_WAIT_BUDGET - so the args are attached to the very
+        // download that triggered the server start. The JS-runtime args are
+        // attached even if the server is disabled or fails. The wait runs
+        // off the GUI thread via `DownloadEngine::handle()`, so the queue
+        // item just shows "queued" a little longer on a cold start.
+        if mediakit_core::pot_provider::is_youtube_url(&url) {
+            if let Some((manager, config, app_data_dir)) = self.pot_context() {
                 let handle = engine.handle();
                 std::thread::spawn(move || {
-                    pot_manager.ensure_started(
-                        pot_config,
-                        app_data_dir.clone(),
-                        app_data_dir.clone(),
-                    );
-                    let deadline = std::time::Instant::now() + Self::YOUTUBE_POT_WAIT_BUDGET;
                     let mut spec = spec;
-                    loop {
-                        match pot_manager.state() {
-                            mediakit_core::pot_provider::PotProviderState::Ready { port } => {
-                                spec.options.extra_args =
-                                    mediakit_core::pot_provider::youtube_extra_args(
-                                        port,
-                                        &mediakit_core::pot_provider::plugin_dir(&app_data_dir),
-                                    );
-                                break;
-                            }
-                            mediakit_core::pot_provider::PotProviderState::Failed(_) => break,
-                            _ if std::time::Instant::now() >= deadline => break,
-                            _ => std::thread::sleep(std::time::Duration::from_millis(300)),
-                        }
-                    }
+                    spec.options.extra_args = mediakit_core::pot_provider::prepare_youtube_args(
+                        &spec.url,
+                        &manager,
+                        config,
+                        &app_data_dir,
+                        mediakit_core::pot_provider::DEFAULT_WAIT_BUDGET,
+                    );
                     handle.submit(spec);
                 });
                 return;
