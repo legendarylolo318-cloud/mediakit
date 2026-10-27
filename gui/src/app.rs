@@ -3548,27 +3548,6 @@ fn themed_visuals(
     visuals
 }
 
-#[cfg(test)]
-mod theme_tests {
-    use super::*;
-
-    #[test]
-    fn strong_text_is_visible_in_every_custom_theme() {
-        for visuals in [
-            nord_visuals(),
-            solarized_dark_visuals(),
-            high_contrast_visuals(),
-            pink_visuals(),
-        ] {
-            assert_ne!(visuals.strong_text_color(), visuals.panel_fill);
-            assert_eq!(
-                Some(visuals.strong_text_color()),
-                visuals.override_text_color
-            );
-        }
-    }
-}
-
 fn nord_visuals() -> egui::Visuals {
     themed_visuals(
         egui::Color32::from_rgb(0x2E, 0x34, 0x40),
@@ -3712,5 +3691,26 @@ impl eframe::App for MediaKitApp {
     fn on_exit(&mut self) {
         self.pot_manager.shutdown();
         crate::settings::save(&self.persisted_settings());
+    }
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::*;
+
+    #[test]
+    fn strong_text_is_visible_in_every_custom_theme() {
+        for visuals in [
+            nord_visuals(),
+            solarized_dark_visuals(),
+            high_contrast_visuals(),
+            pink_visuals(),
+        ] {
+            assert_ne!(visuals.strong_text_color(), visuals.panel_fill);
+            assert_eq!(
+                Some(visuals.strong_text_color()),
+                visuals.override_text_color
+            );
+        }
     }
 }
