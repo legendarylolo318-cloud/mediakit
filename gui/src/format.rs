@@ -4,7 +4,13 @@ pub fn duration(seconds: f64) -> String {
     if seconds <= 0.0 {
         return "-".to_string();
     }
-    let total = seconds.round() as u64;
+    clock(seconds)
+}
+
+/// A position or length on a timeline: like [`duration`], but zero is a real
+/// value ("0:00", the start of the clip), not "unknown".
+pub fn clock(seconds: f64) -> String {
+    let total = seconds.max(0.0).round() as u64;
     let h = total / 3600;
     let m = (total % 3600) / 60;
     let s = total % 60;
@@ -49,6 +55,14 @@ pub fn fps(fps: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clock_shows_zero_as_a_time() {
+        assert_eq!(clock(0.0), "0:00");
+        assert_eq!(clock(-1.0), "0:00");
+        assert_eq!(clock(7300.0), "2:01:40");
+        assert_eq!(duration(0.0), "-");
+    }
 
     #[test]
     fn duration_formats_hours_minutes_seconds() {
