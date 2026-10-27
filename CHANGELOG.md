@@ -31,6 +31,16 @@ tags on the [Releases](../../releases) page.
   PO-token server disabled.
 - Settings files from older versions that lack a field now load instead of
   silently resetting to defaults.
+- Download no longer sits on "Fetching metadata..." until the mouse moves (it
+  only worked while the PO-token server was starting), and yt-dlp update
+  results show up on their own.
+- Column headers and other bold text were invisible in the Nord, Solarized
+  Dark, High Contrast and Pink themes.
+- The queue's move up/down buttons rendered as empty boxes (glyphs missing from
+  the default font).
+- With Advanced open the queue was pushed off-screen; Advanced now scrolls
+  within half the window. The output settings row wraps on narrow windows.
+- The trim timeline shows the clip start as 0:00 instead of "-".
 
 ### Changed
 - Bundled yt-dlp bumped to 2026.10.26 (checksums from the release's own
@@ -49,6 +59,7 @@ tags on the [Releases](../../releases) page.
 - "Open folder" now selects the finished file where the platform supports it.
 
 ### Added
+- Screenshots in the README.
 - yt-dlp error classification (`downloader::classify_ytdlp_error`) with a plain
   sentence and a matching fix button on failed fetches and downloads.
 - Paste a link or file path anywhere in the window.
