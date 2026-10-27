@@ -352,7 +352,7 @@ impl MediaKitApp {
             cookie_file: None,
 
             update_worker: UpdateWorker::new(),
-            ytdlp_auto_update_enabled: persisted.ytdlp_auto_update_enabled,
+            ytdlp_auto_update_enabled: persisted.ytdlp_auto_update_enabled.unwrap_or(true),
             ytdlp_update_message: None,
             ytdlp_update_in_progress: false,
             auto_update_check_started: false,
@@ -396,7 +396,7 @@ impl MediaKitApp {
             override_ffmpeg_path: self.override_ffmpeg.clone(),
             override_ffprobe_path: self.override_ffprobe.clone(),
             override_ytdlp_path: self.override_ytdlp.clone(),
-            ytdlp_auto_update_enabled: self.ytdlp_auto_update_enabled,
+            ytdlp_auto_update_enabled: Some(self.ytdlp_auto_update_enabled),
             download_responsibility_acknowledged: self.download_responsibility_acknowledged,
             download_output_dir: Some(self.download_output_dir.clone()),
             pot_provider_enabled: Some(self.pot_config.enabled),
@@ -636,11 +636,11 @@ impl MediaKitApp {
         Ok(())
     }
 
-    /// Once per session: if the user has opted into weekly auto-updates and
-    /// it's been >= 7 days since the last check (per the state file
-    /// `perform_update`/`check_for_update` maintain), kick off a background
-    /// check-and-install. A no-op if it's not yet been a week, so this is
-    /// cheap to call on every frame until it fires.
+    /// Once per session: if auto-updates are on and it's been >= 24 h since
+    /// the last check (per the state file `perform_update`/
+    /// `check_for_update` maintain), kick off a background check-and-install.
+    /// A no-op otherwise, so this is cheap to call on every frame until it
+    /// fires.
     fn maybe_start_auto_update_check(&mut self) {
         if self.auto_update_check_started || !self.ytdlp_auto_update_enabled {
             return;
@@ -660,10 +660,11 @@ impl MediaKitApp {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let week = 7 * 24 * 60 * 60;
-        let due = state
-            .last_checked_unix
-            .is_none_or(|last| now.saturating_sub(last) >= week);
+        let due = mediakit_core::ytdlp_update::auto_check_due(
+            state.last_checked_unix,
+            now,
+            mediakit_core::ytdlp_update::AUTO_CHECK_INTERVAL_SECS,
+        );
 
         self.auto_update_check_started = true;
         if due {
@@ -2786,7 +2787,7 @@ impl MediaKitApp {
     }
 
     /// The "keep yt-dlp fresh" row under Settings -> Tools: manual check
-    /// button, release staleness, weekly auto-check toggle, and rollback.
+    /// button, release staleness, auto-check toggle, and rollback.
     /// yt-dlp is the one bundled tool that's expected to go stale on its
     /// own (site extractors break as sites change), unlike ffmpeg.
     fn ytdlp_update_row(&mut self, ui: &mut egui::Ui) {
@@ -2834,7 +2835,7 @@ impl MediaKitApp {
             if ui
                 .checkbox(
                     &mut self.ytdlp_auto_update_enabled,
-                    "Check weekly and auto-install",
+                    "Check for updates at launch (daily) and auto-install",
                 )
                 .changed()
             {

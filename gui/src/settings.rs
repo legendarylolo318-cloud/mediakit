@@ -61,10 +61,11 @@ pub struct PersistedSettings {
     pub override_ffmpeg_path: Option<PathBuf>,
     pub override_ffprobe_path: Option<PathBuf>,
     pub override_ytdlp_path: Option<PathBuf>,
-    /// Weekly background check for a newer yt-dlp release, downloading and
-    /// installing it automatically if one's found. Off by default - a user
-    /// has to opt in to MediaKit updating a bundled tool on its own.
-    pub ytdlp_auto_update_enabled: bool,
+    /// Background check (at most once per 24 h, at launch) for a newer
+    /// yt-dlp release, installing it automatically if one's found. `None`
+    /// means "not set yet" and is treated as on: YouTube breaks every few
+    /// weeks, so a stale yt-dlp is the most common reason downloads fail.
+    pub ytdlp_auto_update_enabled: Option<bool>,
     /// Set once the user has dismissed the Download tab's one-time notice
     /// about being responsible for the target site's ToS/copyright - so it
     /// doesn't nag on every launch, only before the tab is used for the
@@ -74,7 +75,7 @@ pub struct PersistedSettings {
     /// Whether the YouTube PO-token server (see
     /// `mediakit_core::pot_provider`) is allowed to start at all. `None`
     /// means "not set yet" - defaults to enabled, unlike
-    /// `ytdlp_auto_update_enabled` which defaults to off.
+    /// `ytdlp_auto_update_enabled`, which also defaults to on.
     pub pot_provider_enabled: Option<bool>,
     /// Port the PO-token server listens on. `None` means "use the default"
     /// (`mediakit_core::pot_provider::DEFAULT_PORT`).

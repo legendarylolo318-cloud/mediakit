@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, Sender};
 #[derive(Debug, Clone)]
 pub enum UpdateOutcome {
     /// A check finished without installing anything (either the button was
-    /// "Check for Updates" only, or the weekly auto-check found nothing
+    /// "Check for Updates" only, or the launch-time auto-check found nothing
     /// newer).
     Checked {
         update_available: bool,
@@ -33,7 +33,7 @@ impl UpdateWorker {
         Self { sender, receiver }
     }
 
-    /// Check only - used by the "Check for Updates" button and the weekly
+    /// Check only - used by the "Check for Updates" button and the
     /// auto-check's first step.
     pub fn check(&self, bin_dir: PathBuf, current_version: String) {
         let sender = self.sender.clone();
@@ -64,8 +64,8 @@ impl UpdateWorker {
     }
 
     /// Check, and only download+install if a newer version is actually
-    /// available - used by the weekly auto-check so it doesn't re-download
-    /// yt-dlp every week regardless of whether it changed.
+    /// available - used by the launch-time auto-check so it doesn't re-download
+    /// yt-dlp on every check regardless of whether it changed.
     pub fn auto_check_and_update(&self, bin_dir: PathBuf, current_version: String) {
         let sender = self.sender.clone();
         std::thread::spawn(move || {

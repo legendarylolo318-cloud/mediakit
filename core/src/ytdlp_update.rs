@@ -280,6 +280,19 @@ fn now_unix() -> u64 {
 /// `"2026-07-04T10:00:00Z"`) and now. `None` if the timestamp can't be
 /// parsed. Implemented by hand (no date/time crate) since this is the only
 /// place MediaKit needs calendar math.
+/// How often the launch-time auto-check may hit the network.
+pub const AUTO_CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
+
+/// Whether an auto-check is due: never checked, or at least `interval_secs`
+/// since the last one. A `last` in the future (clock moved back) counts as
+/// due rather than blocking checks until the clock catches up.
+pub fn auto_check_due(last_checked_unix: Option<u64>, now_unix: u64, interval_secs: u64) -> bool {
+    match last_checked_unix {
+        None => true,
+        Some(last) => last > now_unix || now_unix - last >= interval_secs,
+    }
+}
+
 pub fn days_since(rfc3339: &str) -> Option<i64> {
     let then_unix = parse_rfc3339_unix(rfc3339)?;
     let now = now_unix() as i64;
@@ -356,6 +369,15 @@ deadbeefcafebabe0000000000000000000000000000000000000000000000  yt-dlp_linux
             parse_sha256sums(text, "yt-dlp_linux"),
             Some("abc123".to_string())
         );
+    }
+
+    #[test]
+    fn auto_check_is_throttled_to_the_interval() {
+        let day = AUTO_CHECK_INTERVAL_SECS;
+        assert!(auto_check_due(None, 1000, day));
+        assert!(!auto_check_due(Some(1000), 1000 + day - 1, day));
+        assert!(auto_check_due(Some(1000), 1000 + day, day));
+        assert!(auto_check_due(Some(5000), 1000, day));
     }
 
     #[test]
