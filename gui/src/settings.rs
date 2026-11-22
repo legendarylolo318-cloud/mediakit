@@ -93,6 +93,14 @@ pub struct PersistedSettings {
     /// Extra hosts (comma/space/newline separated) the clipboard watcher
     /// should also offer, on top of the built-in list.
     pub clipboard_extra_hosts: Option<String>,
+    /// Download tab choices, remembered so the tab opens the way it was
+    /// left. Stable ids (see `FormatChoice::id` / `ChainChoice::id`), not
+    /// display labels, so relabelling a choice doesn't forget it.
+    pub download_format: Option<String>,
+    pub download_chain: Option<String>,
+    pub download_tiktok_h264: Option<bool>,
+    /// The Convert tab's "Make vertical 9:16" toggle.
+    pub vertical: Option<bool>,
 }
 
 fn settings_path() -> Option<PathBuf> {

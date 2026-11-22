@@ -79,6 +79,12 @@ pub struct CliArgs {
     /// Discord/QuickTime/browsers instead of just "plays locally".
     #[arg(long, default_value_t = false)]
     pub no_compat_defaults: bool,
+
+    /// Re-frame video output as 9:16 1080x1920 (TikTok / Reels / Shorts),
+    /// with a blurred copy of the video filling the empty space. Applies to
+    /// presets that re-encode video; ignored for GIF/audio/image output.
+    #[arg(long, default_value_t = false)]
+    pub vertical: bool,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -108,6 +114,14 @@ pub enum CliPreset {
 }
 
 impl CliPreset {
+    /// Presets whose output is a re-encoded video (see `--vertical`).
+    fn supports_vertical(self) -> bool {
+        matches!(
+            self,
+            CliPreset::TargetSize | CliPreset::GifToMp4 | CliPreset::GifToWebm
+        )
+    }
+
     fn output_extension(self) -> &'static str {
         match self {
             CliPreset::TargetSize | CliPreset::Mute | CliPreset::StripMetadata => "mp4",
@@ -187,6 +201,9 @@ pub fn run(args: CliArgs) -> i32 {
             }
         };
         settings.disable_compat_defaults = args.no_compat_defaults;
+        if args.vertical && preset.supports_vertical() {
+            mediakit_core::presets::apply_vertical(&mut settings);
+        }
 
         println!(
             "[{}/{}] {} -> {}",

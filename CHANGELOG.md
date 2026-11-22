@@ -4,6 +4,53 @@ All notable changes to MediaKit are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); versions match the
 tags on the [Releases](../../releases) page.
 
+## [0.3.0] - 2026-11-22
+
+### Added
+- **Clip from a link**: "Only download part of it" on the Download tab takes a
+  From/To time (`90`, `1:30` or `1:02:03`) and downloads just that section,
+  with exact cuts. The file name gets a `(clip 1m30s-2m00s)` tag so a clip
+  never overwrites the full video.
+- **Vertical 9:16 (TikTok / Reels / Shorts)**: an optional "Make vertical"
+  checkbox for video presets fits the whole video into a 1080x1920 frame over
+  a blurred copy of itself instead of black bars. Also available as a
+  "Then: -> Vertical 9:16" step after a download, and as `--vertical` on the CLI.
+- **TikTok**: downloads prefer TikTok's H.264 stream over H.265 (which won't
+  play in Discord, Firefox or on Windows without an extra codec), toggleable
+  under Options; TikTok files are named `uploader - caption [id]` so posts with
+  the same caption don't overwrite each other; clear messages for IP/region
+  blocks, photo slideshows and dead share links.
+- The Download button now says what it will do (e.g. "Download clip 1m30s-2m00s
+  -> Discord size (20 MB)"), and is disabled with an explanation when a setting
+  doesn't make sense (bad clip times, audio-only + a video step).
+- Tab badges show how many conversions/downloads are running; "Clear
+  finished" on both queues; a friendlier empty Convert screen with the three
+  steps and a shortcut to the Download tab.
+- The Download tab's format, "Then:" step and TikTok option, and the vertical
+  toggle, are remembered between launches.
+
+### Changed
+- **Discord Free is now 20 MB** (was 10 MB). Existing `presets.toml` files are
+  upgraded automatically if the Free entry was never edited; edited entries
+  are left alone.
+- Much lower CPU/GPU use while jobs run: the window now redraws ~10 times a
+  second during encodes/downloads instead of at the monitor's refresh rate.
+- The GUI asks for the low-power GPU and wgpu's memory-saving allocator
+  (keeps the discrete GPU asleep on hybrid laptops; `WGPU_POWER_PREF=high`
+  overrides).
+- Trim-timeline thumbnails are freed when you switch files (they used to stay
+  in GPU memory all session) and are extracted from keyframes, which is much
+  cheaper on long 4K videos.
+
+### Fixed
+- Re-pinned the bundled ffmpeg to BtbN's month-end autobuild
+  (`autobuild-2026-10-31-12-59`, 8.1.3) after the previous daily tag was pruned
+  and every build 404'd. Month-end tags are kept upstream indefinitely.
+- The download command preview no longer creates output folders (on every
+  frame) just by being open.
+- `zstd` is only a dependency of the bundled build; clippy's
+  `needless_range_loop` in the presets editor.
+
 ## [0.2.1] - 2026-10-27
 
 ### Fixed

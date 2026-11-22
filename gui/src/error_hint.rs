@@ -58,6 +58,14 @@ pub fn hint(kind: YtdlpErrorKind, node_found: bool) -> (&'static str, FixAction)
             "yt-dlp doesn't recognise this link. Check it points at a video page.",
             FixAction::Retry,
         ),
+        YtdlpErrorKind::IpBlocked => (
+            "The site is blocking downloads from your network or region. Signing in with browser cookies (or a VPN) usually gets around it.",
+            FixAction::UseCookies,
+        ),
+        YtdlpErrorKind::TikTokPhoto => (
+            "This is a TikTok photo slideshow, not a video, and yt-dlp can't download those yet. A newer yt-dlp may add support.",
+            FixAction::UpdateYtdlp,
+        ),
         YtdlpErrorKind::Network => (
             "Couldn't reach the site. Check your connection and try again.",
             FixAction::Retry,
@@ -102,6 +110,8 @@ mod tests {
             LoginRequired,
             Unavailable,
             UnsupportedUrl,
+            IpBlocked,
+            TikTokPhoto,
             Network,
             Unknown,
         ] {

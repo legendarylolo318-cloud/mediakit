@@ -19,8 +19,8 @@ use eframe::egui;
 use mediakit_core::command::{AudioCodec, Container, VideoCodec};
 use mediakit_core::download_engine::{DownloadEngine, DownloadEvent, DownloadSpec};
 use mediakit_core::downloader::{
-    self, CookieSource, DownloadOptions, FormatSelection, Metadata, PlaylistEntry, SubtitleOptions,
-    VideoMetadata,
+    self, ClipSection, CookieSource, DownloadOptions, FormatSelection, Metadata, PlaylistEntry,
+    SubtitleOptions, VideoMetadata,
 };
 use mediakit_core::engine::{EngineEvent, JobEngine};
 use mediakit_core::ffmpeg_env::{self, FfmpegEnv};
@@ -96,6 +96,28 @@ impl FormatChoice {
         }
     }
 
+    fn id(self) -> &'static str {
+        match self {
+            FormatChoice::Best => "best",
+            FormatChoice::BestUpTo1080p => "1080p",
+            FormatChoice::BestUpTo720p => "720p",
+            FormatChoice::AudioOnlyMp3 => "mp3",
+            FormatChoice::AudioOnlyBest => "audio",
+            FormatChoice::Custom => "custom",
+        }
+    }
+
+    fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.id() == id)
+    }
+
+    fn is_audio_only(self) -> bool {
+        matches!(
+            self,
+            FormatChoice::AudioOnlyMp3 | FormatChoice::AudioOnlyBest
+        )
+    }
+
     fn resolve(self, custom_text: &str) -> FormatSelection {
         match self {
             FormatChoice::Best => FormatSelection::Best,
@@ -119,15 +141,19 @@ enum CookieChoice {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChainChoice {
     None,
-    Discord10Mb,
+    /// Shrink to the "discord-free" size preset (20 MB by default).
+    DiscordSize,
+    /// Re-frame as 9:16 vertical video for TikTok / Reels / Shorts.
+    Vertical,
     VideoToGif,
     ExtractMp3,
 }
 
 impl ChainChoice {
-    const ALL: [ChainChoice; 4] = [
+    const ALL: [ChainChoice; 5] = [
         ChainChoice::None,
-        ChainChoice::Discord10Mb,
+        ChainChoice::DiscordSize,
+        ChainChoice::Vertical,
         ChainChoice::VideoToGif,
         ChainChoice::ExtractMp3,
     ];
@@ -135,10 +161,36 @@ impl ChainChoice {
     fn label(self) -> &'static str {
         match self {
             ChainChoice::None => "Just download",
-            ChainChoice::Discord10Mb => "-> Discord 10 MB",
+            ChainChoice::DiscordSize => "-> Discord size (20 MB)",
+            ChainChoice::Vertical => "-> Vertical 9:16 (TikTok/Shorts)",
             ChainChoice::VideoToGif => "-> GIF",
             ChainChoice::ExtractMp3 => "-> Extract MP3",
         }
+    }
+
+    /// Stable id: persisted in settings and stored on queued downloads.
+    /// "discord10mb" is kept from older versions so saved settings still
+    /// load; the size itself always comes from presets.toml.
+    fn id(self) -> &'static str {
+        match self {
+            ChainChoice::None => "none",
+            ChainChoice::DiscordSize => "discord10mb",
+            ChainChoice::Vertical => "vertical",
+            ChainChoice::VideoToGif => "gif",
+            ChainChoice::ExtractMp3 => "mp3",
+        }
+    }
+
+    fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.id() == id)
+    }
+
+    /// Whether this needs a video stream (so pointless with audio-only).
+    fn needs_video(self) -> bool {
+        matches!(
+            self,
+            ChainChoice::DiscordSize | ChainChoice::Vertical | ChainChoice::VideoToGif
+        )
     }
 }
 
@@ -219,6 +271,12 @@ pub struct MediaKitApp {
     download_sub_langs: String,
     download_auto_subs: bool,
     download_sponsorblock: bool,
+    /// Prefer TikTok's H.264 stream over its H.265 one (plays everywhere).
+    download_tiktok_h264: bool,
+    /// "Only download part of it": on/off plus the From/To text fields.
+    download_clip_enabled: bool,
+    download_clip_start: String,
+    download_clip_end: String,
     download_rate_limit_kbps: String,
     download_concurrent_fragments: String,
     download_chain: ChainChoice,
@@ -320,6 +378,7 @@ impl MediaKitApp {
             config.apply_size_preset(first, size_presets.safety_margin_fraction());
             config.mode = Mode::Video; // apply_size_preset also sets Mode::TargetSize; start on Video like before.
         }
+        config.vertical = persisted.vertical.unwrap_or(false);
 
         let mut output_settings = OutputSettings::default();
         let mut output_folder_display = String::new();
@@ -380,7 +439,11 @@ impl MediaKitApp {
             clipboard_hosts_applied: String::new(),
             clipboard_offers: clipboard_watch::Offers::default(),
 
-            download_format: FormatChoice::Best,
+            download_format: persisted
+                .download_format
+                .as_deref()
+                .and_then(FormatChoice::from_id)
+                .unwrap_or(FormatChoice::Best),
             download_custom_format: String::new(),
             download_embed_thumbnail: false,
             download_embed_metadata: false,
@@ -388,9 +451,17 @@ impl MediaKitApp {
             download_sub_langs: "en".to_string(),
             download_auto_subs: false,
             download_sponsorblock: false,
+            download_tiktok_h264: persisted.download_tiktok_h264.unwrap_or(true),
+            download_clip_enabled: false,
+            download_clip_start: String::new(),
+            download_clip_end: String::new(),
             download_rate_limit_kbps: String::new(),
             download_concurrent_fragments: String::new(),
-            download_chain: ChainChoice::None,
+            download_chain: persisted
+                .download_chain
+                .as_deref()
+                .and_then(ChainChoice::from_id)
+                .unwrap_or(ChainChoice::None),
             download_output_dir: persisted
                 .download_output_dir
                 .clone()
@@ -455,6 +526,10 @@ impl MediaKitApp {
             download_output_dir: Some(self.download_output_dir.clone()),
             pot_provider_enabled: Some(self.pot_config.enabled),
             pot_provider_port: Some(self.pot_config.port),
+            download_format: Some(self.download_format.id().to_string()),
+            download_chain: Some(self.download_chain.id().to_string()),
+            download_tiktok_h264: Some(self.download_tiktok_h264),
+            vertical: Some(self.config.vertical),
         }
     }
 
@@ -901,6 +976,10 @@ impl MediaKitApp {
 
         let mut config = EncodeConfig::default();
         match chain.as_str() {
+            "vertical" => {
+                config.mode = Mode::Video;
+                config.vertical = true;
+            }
             "discord10mb" => {
                 let preset = self
                     .size_presets
@@ -1000,14 +1079,15 @@ impl MediaKitApp {
             "" => "%(title)s.%(ext)s",
             t => t,
         };
+        // Folders are created when a download is actually queued (see
+        // `queue_download`), not here: this also runs every frame for the
+        // command preview.
         let output_template = if self.download_chain != ChainChoice::None {
-            let _ = std::fs::create_dir_all(Self::chain_temp_dir());
             Self::chain_temp_dir()
                 .join(template)
                 .to_string_lossy()
                 .into_owned()
         } else {
-            let _ = std::fs::create_dir_all(&self.download_output_dir);
             self.download_output_dir
                 .join(template)
                 .to_string_lossy()
@@ -1030,9 +1110,74 @@ impl MediaKitApp {
             rate_limit_kbps: self.download_rate_limit_kbps.trim().parse().ok(),
             concurrent_fragments: self.download_concurrent_fragments.trim().parse().ok(),
             cookies: self.current_cookie_source(),
+            section: None,
             output_template,
             extra_args: Vec::new(),
         }
+    }
+
+    /// [`Self::current_download_options`] plus any per-site tweaks for
+    /// `url` (see `mediakit_core::sites`). YouTube's args are attached
+    /// later, off-thread, in [`Self::queue_download`].
+    fn download_options_for(&self, url: &str, format: &FormatSelection) -> DownloadOptions {
+        let mut options = self.current_download_options();
+        options.section = self.clip_section().ok().flatten();
+        if mediakit_core::sites::is_tiktok_url(url) {
+            options.extra_args =
+                mediakit_core::sites::tiktok_extra_args(self.download_tiktok_h264, format);
+            options.output_template =
+                mediakit_core::sites::tiktok_output_template(&options.output_template);
+        }
+        options
+    }
+
+    /// The "Only download part of it" range, if turned on. `Err` carries a
+    /// short message for the user when the From/To fields don't make sense.
+    fn clip_section(&self) -> Result<Option<ClipSection>, String> {
+        if !self.download_clip_enabled {
+            return Ok(None);
+        }
+        let start_text = self.download_clip_start.trim();
+        let end_text = self.download_clip_end.trim();
+        let start = match start_text {
+            "" => 0.0,
+            t => downloader::parse_timestamp(t)
+                .ok_or_else(|| format!("\"{t}\" isn't a time - use 90, 1:30 or 1:02:03"))?,
+        };
+        let end = match end_text {
+            "" => None,
+            t => Some(
+                downloader::parse_timestamp(t)
+                    .ok_or_else(|| format!("\"{t}\" isn't a time - use 90, 1:30 or 1:02:03"))?,
+            ),
+        };
+        if start_text.is_empty() && end.is_none() {
+            return Err("Enter a From and/or To time".to_string());
+        }
+        if let Some(end) = end {
+            if end <= start {
+                return Err("To must be after From".to_string());
+            }
+        }
+        Ok(Some(ClipSection {
+            start_seconds: start,
+            end_seconds: end,
+        }))
+    }
+
+    /// Main Download button text, spelling out what will happen.
+    fn download_button_label(&self, clip: Option<&ClipSection>) -> String {
+        let mut label = match clip {
+            Some(c) => format!("Download clip {}", c.label()),
+            None => "Download".to_string(),
+        };
+        if self.download_chain != ChainChoice::None {
+            label.push_str(&format!(
+                "  \u{2192}  {}",
+                self.download_chain.label().trim_start_matches("-> ")
+            ));
+        }
+        label
     }
 
     /// What background threads need to build YouTube args (see
@@ -1057,7 +1202,12 @@ impl MediaKitApp {
         self.next_id += 1;
 
         let format = self.download_format.resolve(&self.download_custom_format);
-        let options = self.current_download_options();
+        let options = self.download_options_for(&url, &format);
+        let _ = std::fs::create_dir_all(if self.download_chain != ChainChoice::None {
+            Self::chain_temp_dir()
+        } else {
+            self.download_output_dir.clone()
+        });
         let ffmpeg_dir = match &self.ffmpeg_status {
             FfmpegStatus::Ready(env) => env
                 .ffmpeg_path
@@ -1069,15 +1219,7 @@ impl MediaKitApp {
 
         let mut item = DownloadQueueItem::new(id, url.clone(), title);
         if self.download_chain != ChainChoice::None {
-            item.chain_to = Some(
-                match self.download_chain {
-                    ChainChoice::Discord10Mb => "discord10mb",
-                    ChainChoice::VideoToGif => "gif",
-                    ChainChoice::ExtractMp3 => "mp3",
-                    ChainChoice::None => unreachable!(),
-                }
-                .to_string(),
-            );
+            item.chain_to = Some(self.download_chain.id().to_string());
         }
         self.download_items.push(item);
 
@@ -1231,16 +1373,31 @@ impl MediaKitApp {
                 }
             }
         });
+        if self.download_format.is_audio_only() && self.download_chain.needs_video() {
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 140, 60),
+                "Audio-only downloads have no video for that \"Then:\" step - pick a video \
+                 format, or \"Just download\".",
+            );
+        }
+        self.download_clip_row(ui);
         self.download_output_dir_row(ui);
-        let can_download = !self.download_url_input.trim().is_empty();
-        if ui
+        let clip = self.clip_section();
+        let has_urls = !self.download_url_input.trim().is_empty();
+        let chain_ok = !(self.download_format.is_audio_only() && self.download_chain.needs_video());
+        let label = self.download_button_label(clip.as_ref().ok().and_then(|c| c.as_ref()));
+        let button = ui
             .add_enabled(
-                can_download,
-                egui::Button::new(egui::RichText::new("Download").size(18.0).strong())
+                has_urls && clip.is_ok() && chain_ok,
+                egui::Button::new(egui::RichText::new(label).size(18.0).strong())
                     .min_size(egui::vec2(ui.available_width(), 44.0)),
             )
-            .clicked()
-        {
+            .on_disabled_hover_text(if !has_urls {
+                "Paste a link above first (or press Ctrl+V anywhere)"
+            } else {
+                "Fix the highlighted setting above first"
+            });
+        if button.clicked() {
             self.fetch_download_urls(true);
         }
 
@@ -1356,6 +1513,45 @@ impl MediaKitApp {
         }
     }
 
+    /// "Only download part of it" with From/To fields, right under the
+    /// format row so it's visible without opening Options.
+    fn download_clip_row(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.download_clip_enabled, "Only download part of it")
+                .on_hover_text(
+                    "Download just a section of the video instead of the whole thing. \
+                     Times can be 90, 1:30 or 1:02:03. Leave To empty to go to the end.",
+                );
+            if self.download_clip_enabled {
+                ui.label("From");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.download_clip_start)
+                        .desired_width(70.0)
+                        .hint_text("0:00"),
+                );
+                ui.label("to");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.download_clip_end)
+                        .desired_width(70.0)
+                        .hint_text("end"),
+                );
+                match self.clip_section() {
+                    Err(msg) => {
+                        ui.colored_label(egui::Color32::from_rgb(220, 90, 90), msg);
+                    }
+                    Ok(Some(clip)) => {
+                        let len = clip.end_seconds.map(|e| e - clip.start_seconds);
+                        ui.weak(match len {
+                            Some(len) => format!("({} long)", format::duration(len)),
+                            None => "(to the end)".to_string(),
+                        });
+                    }
+                    Ok(None) => {}
+                }
+            }
+        });
+    }
+
     fn download_output_dir_row(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.label("Save to:");
@@ -1386,6 +1582,12 @@ impl MediaKitApp {
                     ui.checkbox(&mut self.download_embed_thumbnail, "Embed thumbnail");
                     ui.checkbox(&mut self.download_embed_metadata, "Embed metadata");
                     ui.checkbox(&mut self.download_sponsorblock, "SponsorBlock remove");
+                    ui.checkbox(&mut self.download_tiktok_h264, "TikTok: prefer H.264")
+                        .on_hover_text(
+                            "TikTok often serves H.265, which won't play in Discord, Firefox \
+                             or on Windows without an extra codec. This picks the H.264 \
+                             version instead (sometimes 540p rather than 720p).",
+                        );
                 });
                 ui.horizontal_wrapped(|ui| {
                     ui.checkbox(&mut self.download_subtitles, "Subtitles");
@@ -1479,12 +1681,12 @@ impl MediaKitApp {
             FfmpegStatus::NotFound => return,
         };
         let format = self.download_format.resolve(&self.download_custom_format);
-        let options = self.current_download_options();
         let sample_url = self
             .download_cards
             .first()
             .map(|c| c.url.clone())
             .unwrap_or_else(|| "<url>".to_string());
+        let options = self.download_options_for(&sample_url, &format);
         let args =
             downloader::build_download_args_redacted(&sample_url, &format, &ffmpeg_dir, &options);
         let preview = mediakit_core::command::preview_command_string(&ytdlp, &args);
@@ -1511,7 +1713,19 @@ impl MediaKitApp {
             if ui.button("Cancel All").clicked() {
                 self.cancel_all_downloads();
             }
-            if ui.button("Clear").clicked() {
+            if ui
+                .button("Clear finished")
+                .on_hover_text("Remove finished/failed entries (downloaded files stay on disk)")
+                .clicked()
+            {
+                self.download_items.retain(|i| {
+                    matches!(
+                        i.status,
+                        DownloadQueueStatus::Queued | DownloadQueueStatus::Running
+                    )
+                });
+            }
+            if ui.button("Clear all").clicked() {
                 self.cancel_all_downloads();
                 self.download_items.clear();
             }
@@ -1685,8 +1899,36 @@ impl MediaKitApp {
             ui.horizontal(|ui| {
                 ui.heading("MediaKit");
                 ui.separator();
-                ui.selectable_value(&mut self.active_tab, AppTab::Convert, "Convert");
-                ui.selectable_value(&mut self.active_tab, AppTab::Download, "Download");
+                // Badges show work in progress on the tab you're not looking at.
+                let converting = self
+                    .items
+                    .iter()
+                    .filter(|i| matches!(i.status, QueueStatus::Queued | QueueStatus::Running))
+                    .count();
+                let downloading = self
+                    .download_items
+                    .iter()
+                    .filter(|i| {
+                        matches!(
+                            i.status,
+                            DownloadQueueStatus::Queued | DownloadQueueStatus::Running
+                        )
+                    })
+                    .count();
+                let tab_label = |name: &str, n: usize| match n {
+                    0 => name.to_string(),
+                    n => format!("{name} ({n})"),
+                };
+                ui.selectable_value(
+                    &mut self.active_tab,
+                    AppTab::Convert,
+                    tab_label("Convert", converting),
+                );
+                ui.selectable_value(
+                    &mut self.active_tab,
+                    AppTab::Download,
+                    tab_label("Download", downloading),
+                );
                 ui.separator();
                 if ui
                     .button("Add Files\u{2026}")
@@ -1699,12 +1941,42 @@ impl MediaKitApp {
                 }
                 ui.separator();
                 let convert_all_enabled = !self.items.is_empty() && !self.jobs_active();
+                let convert_label = match self.items.len() {
+                    0 => "\u{25B6} Convert All".to_string(),
+                    n => format!("\u{25B6} Convert All ({n})"),
+                };
                 if ui
-                    .add_enabled(convert_all_enabled, egui::Button::new("Convert All"))
-                    .on_hover_text("Ctrl+Enter")
+                    .add_enabled(
+                        convert_all_enabled,
+                        egui::Button::new(egui::RichText::new(convert_label).strong()),
+                    )
+                    .on_hover_text("Run the current preset on every file in the queue (Ctrl+Enter)")
+                    .on_disabled_hover_text(if self.items.is_empty() {
+                        "Add or drop some files first"
+                    } else {
+                        "Wait for the current conversions to finish"
+                    })
                     .clicked()
                 {
                     self.convert_all();
+                }
+                let finished = self
+                    .items
+                    .iter()
+                    .filter(|i| matches!(i.status, QueueStatus::Done))
+                    .count();
+                // Hidden mid-batch: the batch progress counts finished rows.
+                if finished > 0
+                    && self.batch_ids.is_empty()
+                    && ui
+                        .button(format!("Clear finished ({finished})"))
+                        .on_hover_text(
+                            "Remove finished files from the list (the files stay on disk)",
+                        )
+                        .clicked()
+                {
+                    self.items
+                        .retain(|i| !matches!(i.status, QueueStatus::Done));
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1965,6 +2237,17 @@ impl MediaKitApp {
             Mode::Mute | Mode::StripMetadata | Mode::Reverse => {
                 ui.label("No additional options for this preset.");
             }
+        }
+        if self.config.mode.supports_vertical() {
+            ui.checkbox(
+                &mut self.config.vertical,
+                "Make vertical 9:16 (TikTok / Reels / Shorts)",
+            )
+            .on_hover_text(
+                "Fits the whole video into a 1080x1920 portrait frame, filling the \
+                 empty space with a blurred copy instead of black bars. \
+                 Replaces any resolution set under Advanced; crop still applies first.",
+            );
         }
     }
 
@@ -2360,6 +2643,9 @@ impl MediaKitApp {
 
     fn trim_controls(&mut self, ui: &mut egui::Ui) {
         let target = self.timeline_target();
+        if target.is_none() {
+            self.thumb_cache.retain_only(None);
+        }
         if let (Some((path, duration)), FfmpegStatus::Ready(env)) = (&target, &self.ffmpeg_status) {
             self.thumb_cache.request(&env.ffmpeg_path, path, *duration);
             if self.thumb_cache.poll(ui.ctx()) {
@@ -2525,8 +2811,34 @@ impl MediaKitApp {
         ui.separator();
 
         if self.items.is_empty() {
-            ui.centered_and_justified(|ui| {
-                ui.label("Drag & drop media files here, or click \"Add Files\u{2026}\"");
+            ui.add_space(24.0);
+            ui.vertical_centered(|ui| {
+                ui.heading("Drop videos, GIFs, audio or images here");
+                ui.add_space(6.0);
+                ui.label(
+                    "1. Pick what you want above   2. Add files   3. Press \u{25B6} Convert All",
+                );
+                ui.add_space(10.0);
+                if ui
+                    .add(
+                        egui::Button::new(egui::RichText::new("Add Files\u{2026}").size(16.0))
+                            .min_size(egui::vec2(180.0, 36.0)),
+                    )
+                    .clicked()
+                {
+                    if let Some(paths) = rfd::FileDialog::new().pick_files() {
+                        self.add_files(paths);
+                    }
+                }
+                ui.add_space(6.0);
+                if ui
+                    .link(
+                        "Have a link instead? Download it from YouTube, TikTok, and more \u{2192}",
+                    )
+                    .clicked()
+                {
+                    self.active_tab = AppTab::Download;
+                }
             });
             return;
         }
@@ -2886,8 +3198,7 @@ impl MediaKitApp {
                         ui.end_row();
 
                         let len = self.size_presets.presets.len();
-                        for i in 0..len {
-                            let preset = &mut self.size_presets.presets[i];
+                        for (i, preset) in self.size_presets.presets.iter_mut().enumerate() {
                             if ui.text_edit_singleline(&mut preset.display_name).changed() {
                                 changed = true;
                             }
@@ -3681,7 +3992,12 @@ impl eframe::App for MediaKitApp {
             || self.download_jobs_active()
             || self.pot_manager.state() == mediakit_core::pot_provider::PotProviderState::Starting;
         if still_working {
-            ctx.request_repaint();
+            // ~10 fps is plenty for progress bars/ETAs. A bare
+            // `request_repaint()` here redrew the whole UI at the monitor's
+            // refresh rate (60-240 fps) for the entire length of every
+            // encode/download, burning a CPU core and keeping the GPU awake.
+            // Input events still repaint immediately, so the UI stays snappy.
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         } else if self.waiting_on_background_result() {
             // Metadata fetches and yt-dlp updates report over channels that
             // can't wake the UI; without this a fetch "hung" on "Fetching

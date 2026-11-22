@@ -215,6 +215,11 @@ pub enum YtdlpErrorKind {
     /// Private, deleted or otherwise unavailable video.
     Unavailable,
     UnsupportedUrl,
+    /// The site is refusing requests from this IP/region (TikTok says so
+    /// outright: "Your IP address is blocked from accessing this post").
+    IpBlocked,
+    /// A TikTok photo/slideshow post, which yt-dlp can't download as video.
+    TikTokPhoto,
     Network,
     Unknown,
 }
@@ -270,6 +275,16 @@ pub fn classify_ytdlp_error(stderr: &str) -> YtdlpErrorKind {
         "playlist does not exist",
         "channel does not exist",
     ]) {
+        YtdlpErrorKind::Unavailable
+    } else if has(&["ip address is blocked", "your ip is blocked"]) {
+        YtdlpErrorKind::IpBlocked
+    } else if s.contains("unsupported url") && s.contains("tiktok.com/") && s.contains("/photo/") {
+        YtdlpErrorKind::TikTokPhoto
+    } else if s.contains("unsupported url: https://www.tiktok.com/?")
+        || s.trim_end()
+            .ends_with("unsupported url: https://www.tiktok.com/")
+    {
+        // A dead vm./vt.tiktok.com share link redirects to the home page.
         YtdlpErrorKind::Unavailable
     } else if has(&["unsupported url", "is not a valid url"]) {
         YtdlpErrorKind::UnsupportedUrl
@@ -377,6 +392,75 @@ pub struct SubtitleOptions {
     pub auto_subs: bool,
 }
 
+/// Download only part of a video (yt-dlp `--download-sections`). Times
+/// are seconds from the start; `end_seconds: None` means "to the end".
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClipSection {
+    pub start_seconds: f64,
+    pub end_seconds: Option<f64>,
+}
+
+impl ClipSection {
+    /// The `--download-sections` value, e.g. `*83.5-105` or `*83.5-inf`.
+    pub fn spec(&self) -> String {
+        let fmt = |t: f64| {
+            let s = format!("{t:.3}");
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        };
+        let end = self
+            .end_seconds
+            .map(fmt)
+            .unwrap_or_else(|| "inf".to_string());
+        format!("*{}-{end}", fmt(self.start_seconds))
+    }
+
+    /// Short human label used in the file name, e.g. `1m23s-1m45s`.
+    pub fn label(&self) -> String {
+        let fmt = |t: f64| {
+            let t = t.round() as u64;
+            let (h, m, s) = (t / 3600, t / 60 % 60, t % 60);
+            if h > 0 {
+                format!("{h}h{m:02}m{s:02}s")
+            } else if m > 0 {
+                format!("{m}m{s:02}s")
+            } else {
+                format!("{s}s")
+            }
+        };
+        match self.end_seconds {
+            Some(end) => format!("{}-{}", fmt(self.start_seconds), fmt(end)),
+            None => format!("{}-end", fmt(self.start_seconds)),
+        }
+    }
+}
+
+/// Parse a user-typed timestamp: `90`, `90.5`, `1:30`, `01:02:03.5`.
+/// Empty input is `None`; so is anything malformed or negative.
+pub fn parse_timestamp(text: &str) -> Option<f64> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = text.split(':').collect();
+    if parts.len() > 3 {
+        return None;
+    }
+    let mut total = 0.0;
+    for (i, part) in parts.iter().enumerate() {
+        let last = i == parts.len() - 1;
+        let value: f64 = if last {
+            part.parse().ok()?
+        } else {
+            part.parse::<u32>().ok()? as f64
+        };
+        if !value.is_finite() || value < 0.0 || (i > 0 && value >= 60.0) {
+            return None;
+        }
+        total = total * 60.0 + value;
+    }
+    Some(total)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DownloadOptions {
     pub embed_thumbnail: bool,
@@ -386,6 +470,9 @@ pub struct DownloadOptions {
     pub rate_limit_kbps: Option<u64>,
     pub concurrent_fragments: Option<u32>,
     pub cookies: Option<CookieSource>,
+    /// Only download this part of the video. Cuts are made exact with
+    /// `--force-keyframes-at-cuts` (re-encodes around the cut points).
+    pub section: Option<ClipSection>,
     /// yt-dlp output filename template, e.g. `"%(title)s.%(ext)s"`.
     pub output_template: String,
     /// Extra yt-dlp arguments MediaKit itself injects rather than the user
@@ -406,6 +493,7 @@ impl Default for DownloadOptions {
             rate_limit_kbps: None,
             concurrent_fragments: None,
             cookies: None,
+            section: None,
             output_template: "%(title)s.%(ext)s".to_string(),
             extra_args: Vec::new(),
         }
@@ -509,8 +597,22 @@ pub fn build_download_args(
         }
     }
 
+    let mut output_template = options.output_template.clone();
+    if let Some(section) = &options.section {
+        args.push("--download-sections".to_string());
+        args.push(section.spec());
+        args.push("--force-keyframes-at-cuts".to_string());
+        // Tag the file name so a clip never overwrites the full video
+        // (or another clip of it).
+        let tag = format!(" (clip {})", section.label());
+        output_template = match output_template.strip_suffix(".%(ext)s") {
+            Some(stem) => format!("{stem}{tag}.%(ext)s"),
+            None => format!("{output_template}{tag}"),
+        };
+    }
+
     args.push("-o".to_string());
-    args.push(options.output_template.clone());
+    args.push(output_template);
     args.push(url.to_string());
     args
 }
@@ -734,6 +836,65 @@ mod tests {
     }
 
     #[test]
+    fn parses_timestamps() {
+        assert_eq!(parse_timestamp("90"), Some(90.0));
+        assert_eq!(parse_timestamp(" 1:30 "), Some(90.0));
+        assert_eq!(parse_timestamp("1:02:03.5"), Some(3723.5));
+        assert_eq!(parse_timestamp("0:05.25"), Some(5.25));
+        for bad in [
+            "", "abc", "1:60", "-5", "1::2", "1:2:3:4", "1.5:00", "nan", "inf",
+        ] {
+            assert_eq!(parse_timestamp(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn clip_section_spec_and_label() {
+        let clip = ClipSection {
+            start_seconds: 83.5,
+            end_seconds: Some(105.0),
+        };
+        assert_eq!(clip.spec(), "*83.5-105");
+        assert_eq!(clip.label(), "1m24s-1m45s");
+        let open = ClipSection {
+            start_seconds: 3725.0,
+            end_seconds: None,
+        };
+        assert_eq!(open.spec(), "*3725-inf");
+        assert_eq!(open.label(), "1h02m05s-end");
+    }
+
+    #[test]
+    fn clip_section_adds_flags_and_tags_the_filename() {
+        let options = DownloadOptions {
+            section: Some(ClipSection {
+                start_seconds: 10.0,
+                end_seconds: Some(20.0),
+            }),
+            output_template: "/out/%(title)s.%(ext)s".into(),
+            ..Default::default()
+        };
+        let args = build_download_args("url", &FormatSelection::Best, Path::new("/bin"), &options);
+        let i = args
+            .iter()
+            .position(|a| a == "--download-sections")
+            .unwrap();
+        assert_eq!(args[i + 1], "*10-20");
+        assert!(args.contains(&"--force-keyframes-at-cuts".to_string()));
+        let o = args.iter().position(|a| a == "-o").unwrap();
+        assert_eq!(args[o + 1], "/out/%(title)s (clip 10s-20s).%(ext)s");
+        assert_eq!(args.last().unwrap(), "url");
+
+        let plain = build_download_args(
+            "url",
+            &FormatSelection::Best,
+            Path::new("/bin"),
+            &DownloadOptions::default(),
+        );
+        assert!(!plain.contains(&"--download-sections".to_string()));
+    }
+
+    #[test]
     fn classifies_real_looking_ytdlp_errors() {
         use YtdlpErrorKind::*;
         let cases = [
@@ -779,6 +940,18 @@ mod tests {
             (
                 "ERROR: [youtube] abc: Unable to download API page: HTTP Error 403: Forbidden",
                 Http403,
+            ),
+            (
+                "ERROR: [TikTok] 7300000000000000000: Your IP address is blocked from accessing this post",
+                IpBlocked,
+            ),
+            (
+                "ERROR: Unsupported URL: https://www.tiktok.com/@someone/photo/7300000000000000000",
+                TikTokPhoto,
+            ),
+            (
+                "WARNING: [generic] Falling back on generic information extractor\nERROR: Unsupported URL: https://www.tiktok.com/?_r=1",
+                Unavailable,
             ),
             ("something entirely unexpected", Unknown),
             ("", Unknown),

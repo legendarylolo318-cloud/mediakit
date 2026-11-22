@@ -584,8 +584,60 @@ pub fn speed_change(
     }
 }
 
+/// Re-frame an encode as 9:16 vertical: swap any resize for
+/// [`vertical_frame_filter`]. Other filters (crop, rotate, speed, ...) keep
+/// running first, so e.g. a crop picks what ends up in the frame. No-op
+/// without video or for stream copies, which can't be filtered.
+pub fn apply_vertical(settings: &mut EncodeSettings) {
+    let Some(video) = settings.video.as_mut() else {
+        return;
+    };
+    if video.codec == VideoCodec::Copy {
+        return;
+    }
+    video.width = None;
+    video.height = None;
+    settings.video_filters.retain(|f| !f.starts_with("scale="));
+    settings.video_filters.push(vertical_frame_filter());
+}
+
+/// Output size of [`vertical_frame_filter`]: 1080x1920, the 9:16 frame
+/// TikTok, Instagram Reels and YouTube Shorts all expect.
+pub const VERTICAL_SIZE: (u32, u32) = (1080, 1920);
+
+/// `-vf` clause that fits any video into a 9:16 frame: the whole picture,
+/// scaled to fit, over a blurred, zoomed-in copy of itself filling the
+/// rest (instead of black bars). The blur runs on a quarter-size copy and
+/// is then scaled up, which looks the same and costs a small fraction of
+/// blurring at full 1080x1920. Single input, single output, so it can be
+/// comma-joined with other `-vf` clauses (crop before it, etc).
+pub fn vertical_frame_filter() -> String {
+    let (w, h) = VERTICAL_SIZE;
+    let (bw, bh) = (w / 4, h / 4);
+    format!(
+        "split=2[mkv_bg][mkv_fg];\
+         [mkv_bg]scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh},\
+         boxblur=8:2,scale={w}:{h},setsar=1[mkv_bgs];\
+         [mkv_fg]scale={w}:{h}:force_original_aspect_ratio=decrease:force_divisible_by=2,\
+         setsar=1[mkv_fgs];\
+         [mkv_bgs][mkv_fgs]overlay=(W-w)/2:(H-h)/2"
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn vertical_filter_targets_1080x1920_with_a_blurred_background() {
+        let f = super::vertical_frame_filter();
+        assert!(f.starts_with("split=2["));
+        assert!(f.contains("scale=1080:1920:force_original_aspect_ratio=decrease"));
+        assert!(f.contains("boxblur="));
+        assert!(f.ends_with("overlay=(W-w)/2:(H-h)/2"));
+        assert!(
+            !f.contains(' '),
+            "no spaces, so it survives shell-quoted previews"
+        );
+    }
     use super::*;
     use crate::bitrate::DEFAULT_SAFETY_MARGIN;
     use crate::command::build_args;

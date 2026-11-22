@@ -640,6 +640,16 @@ fn setup_and_spawn(
 mod tests {
     use super::*;
 
+    /// Tests that free a port and expect it to stay free (or race to bind
+    /// one) take turns: run in parallel, one test's "definitely free" port
+    /// could be handed to another test's listener in between, which made
+    /// these fail at random in full-workspace runs.
+    static PORT_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn port_lock() -> std::sync::MutexGuard<'static, ()> {
+        PORT_TESTS.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn parses_plain_node_version() {
         assert_eq!(parse_node_version("v22.4.0\n"), Some(22));
@@ -686,6 +696,7 @@ mod tests {
 
     #[test]
     fn pot_args_add_mweb_on_top_of_defaults() {
+        let _ports = port_lock();
         let args = youtube_pot_args(4416, Path::new("/data/pot-provider/plugins"));
         assert_eq!(
             args,
@@ -704,6 +715,7 @@ mod tests {
 
     #[test]
     fn pot_args_use_the_given_port() {
+        let _ports = port_lock();
         let args = youtube_pot_args(9999, Path::new("/plugins"));
         assert!(args.contains(&"youtubepot-bgutilhttp:base_url=http://127.0.0.1:9999".to_string()));
     }
@@ -757,6 +769,7 @@ mod tests {
 
     #[test]
     fn is_port_listening_is_false_for_a_port_nothing_is_bound_to() {
+        let _ports = port_lock();
         // Bind-then-immediately-drop to get a definitely-free port number
         // without racing anything else on the machine for it.
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -767,6 +780,7 @@ mod tests {
 
     #[test]
     fn is_port_listening_is_true_once_something_is_listening() {
+        let _ports = port_lock();
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         // Keep the listener alive by accepting in a background thread so
@@ -779,6 +793,7 @@ mod tests {
 
     #[test]
     fn wait_for_ready_returns_true_as_soon_as_the_port_opens() {
+        let _ports = port_lock();
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
@@ -795,6 +810,7 @@ mod tests {
 
     #[test]
     fn wait_for_ready_gives_up_after_the_attempt_budget() {
+        let _ports = port_lock();
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
@@ -810,6 +826,7 @@ mod tests {
 
     #[test]
     fn pick_port_reuses_the_preferred_port_when_free() {
+        let _ports = port_lock();
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let preferred = listener.local_addr().unwrap().port();
         drop(listener);
@@ -818,6 +835,7 @@ mod tests {
 
     #[test]
     fn pick_port_falls_back_when_preferred_is_taken() {
+        let _ports = port_lock();
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let taken = listener.local_addr().unwrap().port();
         let picked = pick_port(taken);
@@ -856,6 +874,7 @@ mod tests {
 
     #[test]
     fn manager_reuses_an_already_listening_server_without_owning_a_child() {
+        let _ports = port_lock();
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || loop {

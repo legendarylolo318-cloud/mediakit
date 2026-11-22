@@ -13,7 +13,7 @@ default = ["bundled"]
 # user to install anything. Distro packagers who must not vendor binaries
 # (AUR, Nixpkgs, ...) should build with `--no-default-features` instead,
 # which falls back to PATH/manual detection only.
-bundled = []
+bundled = ["dep:zstd"]
 
 [dependencies]
 anyhow.workspace = true
@@ -24,7 +24,7 @@ toml.workspace = true
 directories.workspace = true
 ffmpeg-sidecar.workspace = true
 tracing.workspace = true
-zstd = "0.13.3"
+zstd = { version = "0.13.3", optional = true }
 # Not used directly: forces `ffmpeg-sidecar`'s xz2 to build liblzma from
 # source and link it statically. Otherwise it links whatever liblzma.so the
 # build machine has, which ties release binaries to that machine's glibc.

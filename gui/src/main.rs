@@ -62,6 +62,7 @@ fn main() -> eframe::Result<()> {
             .with_min_inner_size([600.0, 400.0])
             .with_drag_and_drop(true)
             .with_icon(load_app_icon()),
+        wgpu_options: low_power_wgpu_config(),
         ..Default::default()
     };
 
@@ -70,6 +71,27 @@ fn main() -> eframe::Result<()> {
         native_options,
         Box::new(|cc| Ok(Box::new(MediaKitApp::new(cc, persisted)))),
     )
+}
+
+/// egui draws a few thousand flat triangles a frame, so ask wgpu for the
+/// integrated/low-power GPU (on hybrid laptops this keeps the discrete GPU
+/// asleep and its VRAM untouched) and for its memory-saving allocator
+/// strategy (smaller device-memory blocks instead of large up-front pools).
+/// `WGPU_POWER_PREF=high` still overrides the adapter choice.
+fn low_power_wgpu_config() -> eframe::egui_wgpu::WgpuConfiguration {
+    use eframe::egui_wgpu::{wgpu, WgpuSetup, WgpuSetupCreateNew};
+    let mut setup = WgpuSetupCreateNew::without_display_handle();
+    setup.power_preference =
+        wgpu::PowerPreference::from_env().unwrap_or(wgpu::PowerPreference::LowPower);
+    let default_device = std::sync::Arc::clone(&setup.device_descriptor);
+    setup.device_descriptor = std::sync::Arc::new(move |adapter| wgpu::DeviceDescriptor {
+        memory_hints: wgpu::MemoryHints::MemoryUsage,
+        ..default_device(adapter)
+    });
+    eframe::egui_wgpu::WgpuConfiguration {
+        wgpu_setup: WgpuSetup::CreateNew(setup),
+        ..Default::default()
+    }
 }
 
 /// Window/taskbar icon shown by the windowing system at runtime (all

@@ -8,7 +8,9 @@ use eframe::egui;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
 
 pub const THUMB_COUNT: usize = 10;
 const THUMB_W: usize = 160;
@@ -81,6 +83,15 @@ struct Entry {
     textures: Vec<Option<egui::TextureHandle>>,
     /// Frames not yet reported back by the extraction thread.
     pending: usize,
+    /// Set when the entry is evicted so the extraction thread stops
+    /// spawning ffmpeg for a file nobody is looking at any more.
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Drop for Entry {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
 }
 
 pub struct ThumbCache {
@@ -99,16 +110,22 @@ impl ThumbCache {
         }
     }
 
-    /// Start extraction for `path` the first time it's seen.
+    /// Start extraction for `path` the first time it's seen. Only one
+    /// file's strip is ever on screen, so every other file's textures are
+    /// dropped here - otherwise each video ever selected kept its frames in
+    /// GPU memory for the rest of the session.
     pub fn request(&mut self, ffmpeg: &Path, path: &Path, duration: f64) {
+        self.retain_only(Some(path));
         if self.entries.contains_key(path) {
             return;
         }
+        let cancelled = Arc::new(AtomicBool::new(false));
         self.entries.insert(
             path.to_path_buf(),
             Entry {
                 textures: vec![None; THUMB_COUNT],
                 pending: thumbnail_times(duration, THUMB_COUNT).len(),
+                cancelled: Arc::clone(&cancelled),
             },
         );
         let sender = self.sender.clone();
@@ -119,6 +136,9 @@ impl ThumbCache {
                 .into_iter()
                 .enumerate()
             {
+                if cancelled.load(Ordering::Relaxed) {
+                    return;
+                }
                 let rgba = extract_frame(&ffmpeg, &path, t);
                 let thumb = Thumb {
                     path: path.clone(),
@@ -130,6 +150,14 @@ impl ThumbCache {
                 }
             }
         });
+    }
+
+    /// Drop every cached strip except `keep`'s (all of them for `None`),
+    /// freeing their textures and stopping any extraction still running.
+    pub fn retain_only(&mut self, keep: Option<&Path>) {
+        if self.entries.len() > usize::from(keep.is_some_and(|k| self.entries.contains_key(k))) {
+            self.entries.retain(|p, _| Some(p.as_path()) == keep);
+        }
     }
 
     /// Turn finished frames into textures. Returns true if any arrived (the
@@ -169,22 +197,40 @@ impl ThumbCache {
 /// image decoder is needed. `None` if ffmpeg fails or returns a short read.
 fn extract_frame(ffmpeg: &Path, input: &Path, t: f64) -> Option<Vec<u8>> {
     let mut cmd = Command::new(ffmpeg);
-    cmd.args(["-v", "error", "-ss", &format!("{t:.3}"), "-i"])
-        .arg(input)
-        .args([
-            "-frames:v",
-            "1",
-            "-vf",
-            &format!(
-                "scale={THUMB_W}:{THUMB_H}:force_original_aspect_ratio=decrease,\
+    // Decode keyframes only and take the one at/before `t`: a thumbnail
+    // doesn't need frame accuracy, and this skips decoding up to a whole GOP
+    // per frame (seconds of CPU on long-GOP 4K files). Audio/subtitle/data
+    // streams are never opened for decoding.
+    cmd.args([
+        "-v",
+        "error",
+        "-threads",
+        "1",
+        "-skip_frame",
+        "nokey",
+        "-noaccurate_seek",
+        "-ss",
+        &format!("{t:.3}"),
+        "-an",
+        "-sn",
+        "-dn",
+        "-i",
+    ])
+    .arg(input)
+    .args([
+        "-frames:v",
+        "1",
+        "-vf",
+        &format!(
+            "scale={THUMB_W}:{THUMB_H}:force_original_aspect_ratio=decrease,\
                  pad={THUMB_W}:{THUMB_H}:(ow-iw)/2:(oh-ih)/2,format=rgba"
-            ),
-            "-f",
-            "rawvideo",
-            "-",
-        ])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null());
+        ),
+        "-f",
+        "rawvideo",
+        "-",
+    ])
+    .stdin(Stdio::null())
+    .stderr(Stdio::null());
     mediakit_core::sys::no_console_window(&mut cmd);
     let output = cmd.output().ok()?;
     (output.status.success() && output.stdout.len() == THUMB_W * THUMB_H * 4)

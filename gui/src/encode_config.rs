@@ -45,6 +45,15 @@ impl Mode {
         Mode::SpeedChange,
     ];
 
+    /// Modes whose output is a re-encoded video, where the 9:16 vertical
+    /// frame makes sense.
+    pub fn supports_vertical(self) -> bool {
+        matches!(
+            self,
+            Mode::Video | Mode::TargetSize | Mode::GifToVideo | Mode::SpeedChange | Mode::Reverse
+        )
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Mode::Video => "Convert video",
@@ -165,6 +174,11 @@ pub struct EncodeConfig {
     /// H.264 MP4 output gets forced `yuv420p` + `-movflags +faststart`
     /// unless the user unchecks this.
     pub disable_compat_defaults: bool,
+
+    /// Fit the output into a 9:16 1080x1920 frame over a blurred copy of
+    /// itself (TikTok / Reels / Shorts). Off unless the user turns it on;
+    /// only applies to modes that re-encode video (see [`Mode::supports_vertical`]).
+    pub vertical: bool,
 }
 
 impl Default for EncodeConfig {
@@ -210,6 +224,7 @@ impl Default for EncodeConfig {
             custom_args: String::new(),
             hardware_encoder: None,
             disable_compat_defaults: false,
+            vertical: false,
         }
     }
 }
@@ -253,6 +268,9 @@ impl EncodeConfig {
 
         let mut job = self.build_for_mode(input, output, duration_seconds, extra_args);
         job.settings.disable_compat_defaults = self.disable_compat_defaults;
+        if self.vertical && self.mode.supports_vertical() {
+            presets::apply_vertical(&mut job.settings);
+        }
         job
     }
 
@@ -529,5 +547,42 @@ impl EncodeConfig {
             | Mode::Reverse
             | Mode::SpeedChange => self.container.extension(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vertical_replaces_resize_and_runs_after_crop() {
+        let config = EncodeConfig {
+            mode: Mode::Video,
+            width: Some(1280),
+            crop: Some((0, 0, 100, 100)),
+            vertical: true,
+            ..Default::default()
+        };
+        let job = config.build("in.mp4".into(), "out.mp4".into(), 10.0);
+        let filters = &job.settings.video_filters;
+        assert!(!filters.iter().any(|f| f.starts_with("scale=")));
+        assert!(filters[0].starts_with("crop="));
+        assert_eq!(filters.last().unwrap(), &presets::vertical_frame_filter());
+    }
+
+    #[test]
+    fn vertical_is_ignored_when_off_or_for_non_video_modes() {
+        let off = EncodeConfig::default().build("a.mp4".into(), "b.mp4".into(), 1.0);
+        assert!(off.settings.video_filters.is_empty());
+        let gif = EncodeConfig {
+            mode: Mode::VideoToGif,
+            vertical: true,
+            ..Default::default()
+        }
+        .build("a.mp4".into(), "b.gif".into(), 1.0);
+        assert!(!gif
+            .settings
+            .video_filters
+            .contains(&presets::vertical_frame_filter()));
     }
 }

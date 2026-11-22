@@ -92,9 +92,40 @@ pub fn load_or_seed(config_dir: &Path) -> SizePresetsConfig {
         .ok()
         .and_then(|s| toml::from_str::<SizePresetsConfig>(&s).ok());
     match loaded {
-        Some(config) if !config.presets.is_empty() => config,
+        Some(mut config) if !config.presets.is_empty() => {
+            if migrate_shipped_defaults(&mut config) {
+                let _ = save(config_dir, &config);
+            }
+            config
+        }
         _ => SizePresetsConfig::defaults(),
     }
+}
+
+/// Shipped defaults that have since changed, as `(id, old display name,
+/// old limit)`. A user's preset is only upgraded if it still matches the
+/// old shipped values exactly, so anything they edited is left alone.
+const SUPERSEDED_DEFAULTS: &[(&str, &str, u64)] =
+    &[("discord-free", "Discord \u{2014} Free (10 MB)", 10_485_760)];
+
+/// Bring untouched copies of old shipped presets up to the current
+/// defaults (e.g. Discord Free 10 MB -> 20 MB). Returns whether anything
+/// changed, so the caller can write the file back.
+pub fn migrate_shipped_defaults(config: &mut SizePresetsConfig) -> bool {
+    let defaults = SizePresetsConfig::defaults();
+    let mut changed = false;
+    for (id, old_name, old_limit) in SUPERSEDED_DEFAULTS {
+        let Some(new) = defaults.find(id) else {
+            continue;
+        };
+        for preset in config.presets.iter_mut().filter(|p| p.id == *id) {
+            if preset.display_name == *old_name && preset.limit_bytes == *old_limit {
+                *preset = new.clone();
+                changed = true;
+            }
+        }
+    }
+    changed
 }
 
 pub fn save(config_dir: &Path, config: &SizePresetsConfig) -> std::io::Result<()> {
@@ -133,6 +164,52 @@ pub fn check_output_size(actual_bytes: u64, limit_bytes: u64) -> SizeCheckResult
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discord_free_defaults_to_20_mib() {
+        let config = SizePresetsConfig::defaults();
+        assert_eq!(config.find("discord-free").unwrap().limit_bytes, 20 * MIB);
+    }
+
+    #[test]
+    fn untouched_old_discord_free_is_upgraded_but_edits_are_kept() {
+        let old = SizePreset {
+            id: "discord-free".into(),
+            display_name: "Discord \u{2014} Free (10 MB)".into(),
+            limit_bytes: 10_485_760,
+            note: String::new(),
+        };
+        let mut config = SizePresetsConfig {
+            safety_margin_percent: 97.0,
+            presets: vec![old.clone()],
+        };
+        assert!(migrate_shipped_defaults(&mut config));
+        assert_eq!(config.presets[0].limit_bytes, 20 * MIB);
+        assert!(!migrate_shipped_defaults(&mut config));
+
+        let mut edited = SizePresetsConfig {
+            safety_margin_percent: 97.0,
+            presets: vec![SizePreset {
+                limit_bytes: 9 * MIB,
+                ..old
+            }],
+        };
+        assert!(!migrate_shipped_defaults(&mut edited));
+        assert_eq!(edited.presets[0].limit_bytes, 9 * MIB);
+    }
+
+    #[test]
+    fn load_or_seed_upgrades_an_old_seeded_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = DEFAULT_PRESETS_TOML
+            .replace("Free (20 MB)", "Free (10 MB)")
+            .replace("20_971_520", "10_485_760");
+        std::fs::write(presets_path(dir.path()), old).unwrap();
+        let config = load_or_seed(dir.path());
+        assert_eq!(config.find("discord-free").unwrap().limit_bytes, 20 * MIB);
+        let reloaded = load_or_seed(dir.path());
+        assert_eq!(reloaded.find("discord-free").unwrap().limit_bytes, 20 * MIB);
+    }
 
     #[test]
     fn bundled_presets_toml_parses_and_is_nonempty() {

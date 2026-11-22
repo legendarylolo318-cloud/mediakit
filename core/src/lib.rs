@@ -12,6 +12,7 @@ pub mod presets;
 pub mod probe;
 pub mod procgroup;
 pub mod progress;
+pub mod sites;
 pub mod size_presets;
 pub mod sys;
 pub mod vendor;

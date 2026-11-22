@@ -11,16 +11,17 @@
 # multiples to match what file managers/`du`/most OSes actually report,
 # which is what a user compares the result against - not decimal MB.
 #
-# Caps last verified against each platform's own published limits: 2026-08-03.
+# Caps last verified against each platform's own published limits: 2026-08-03
+# (Discord Free updated to 20 MB on 2026-11-22).
 # If a limit changes, edit the matching `limit_bytes` below.
 
 safety_margin_percent = 97.0
 
 [[presets]]
 id = "discord-free"
-display_name = "Discord — Free (10 MB)"
-limit_bytes = 10_485_760
-note = "Discord's free-tier upload cap, verified 2026-08-03."
+display_name = "Discord — Free (20 MB)"
+limit_bytes = 20_971_520
+note = "Discord's free-tier upload cap (raised from 10 MB), updated 2026-11-22."
 
 [[presets]]
 id = "discord-nitro-basic"

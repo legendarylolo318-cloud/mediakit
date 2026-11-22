@@ -26,11 +26,14 @@ Built with Rust + [egui](https://github.com/emilk/egui) for the GUI, and drives 
 - Extract audio → MP3 / Opus / FLAC / WAV
 - Convert image → PNG / JPG / WebP / AVIF / BMP / ICO, with a quality slider
 - Mute, strip metadata, rotate/flip, reverse, speed up/slow down
+- **Vertical 9:16** (optional): fit any video into a 1080x1920 TikTok/Reels/Shorts frame over a blurred copy of itself (`--vertical` on the CLI)
 
 **Download tab** (optional, powered by bundled `yt-dlp`)
 - Paste one or many URLs (single videos, playlists, or channels) and fetch metadata — title, uploader, duration, thumbnail, format table
 - One-click format picker (Best / Best ≤1080p / Best ≤720p / audio-only MP3 / audio-only best) or a raw format-selector field
 - Playlist/channel support with per-item checkboxes and select-all/none
+- **Clip from a link**: download just a section (From/To, e.g. `1:30`–`2:00`) with exact cuts
+- **TikTok**: prefers the H.264 stream so files play in Discord/Firefox/Windows, names files `uploader - caption [id]`
 - Options: embed thumbnail/metadata, subtitles (with auto-subs), SponsorBlock removal, rate limiting, concurrent fragments, custom filename template
 - Login-required content: cookies from a browser profile or a `cookies.txt` file — MediaKit never stores credentials and redacts cookie values from any displayed/copied command
 - **Chaining**: "Download → Discord-size clip", "Download → GIF", "Download → MP3" queue as one entry; the intermediate download is cleaned up automatically once the conversion finishes
@@ -128,11 +131,11 @@ Target-size limits (Discord's tiers, and anywhere else you add) are **data, not 
 - Sizes are computed in **MiB (1024²)**, not decimal MB, matching what file managers and `du` report.
 - After every size-targeted encode, MediaKit checks the real output size against the preset's limit and shows a pass/fail badge with the actual byte count — not just "done".
 
-Shipped defaults (Discord's caps as verified **2026-08-03** — check Discord's own current limits and edit `presets.toml` if they've changed since):
+Shipped defaults (Discord's caps as verified **2026-08-03**, Free updated to 20 MB on **2026-11-22** — check Discord's own current limits and edit `presets.toml` if they've changed since):
 
 | Preset | Limit |
 |---|---|
-| Discord — Free | 10 MB |
+| Discord — Free | 20 MB |
 | Discord — Nitro Basic | 50 MB |
 | Discord — Nitro | 500 MB |
 | Discord — Legacy / safe | 8 MB |
