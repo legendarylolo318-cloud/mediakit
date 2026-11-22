@@ -14,8 +14,6 @@
 # publisher's own checksums file (BtbN's `checksums.sha256`, yt-dlp's
 # `SHA2-256SUMS`), and update the corresponding entry below. Never copy a
 # hash from anywhere other than the upstream release's own checksum file.
-# The weekly "vendor freshness" CI workflow (.github/workflows/vendor-check.yml)
-# does exactly this automatically and opens a PR - it never auto-merges.
 #
 # `release_tag` and `date_pinned` are record-keeping only (build.rs doesn't
 # read them): they tell a human, at a glance, how old a pin is and which
@@ -23,9 +21,13 @@
 # from the URL.
 #
 # Both ffmpeg builds come from BtbN's FFmpeg-Builds project, pinned to a
-# *dated* "autobuild-*" tag, not a stable release - those get pruned
-# periodically, and when a pinned tag disappears every build 404s until
-# vendor.toml is updated. (An earlier version of this file pointed Linux at
+# *dated* "autobuild-*" tag, not a stable release. BtbN deletes the daily
+# autobuilds after about two weeks but keeps each month's LAST autobuild
+# (e.g. autobuild-2026-10-31-*) indefinitely - so always pin a month-end
+# tag. Pinning a mid-month daily tag means every build 404s once it's
+# pruned (this happened with autobuild-2026-10-26-14-25).
+#
+# (An earlier version of this file pointed Linux at
 # johnvansickle.com's "releases" URL instead - that path is *not* pinned to
 # a specific version despite looking like it; johnvansickle overwrites it in
 # place on every new upstream ffmpeg release, so the checksum here would
@@ -42,25 +44,25 @@
 
 [ffmpeg.linux-x86_64]
 version = "8.1.3"
-url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-26-14-25/ffmpeg-n8.1.3-24-g92611900bb-linux64-gpl-8.1.tar.xz"
-sha256 = "d113aa5b57ab0dcfee171d835240ce3ea5db826a0ee80ed7528c8d26a61e87a4"
+url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59/ffmpeg-n8.1.3-27-g8dca1586f4-linux64-gpl-8.1.tar.xz"
+sha256 = "41e9c565594c390622cf968d82fa4135d9e9a11d06c1515644288cbc844e3380"
 archive_kind = "tar_xz"
-ffmpeg_path_in_archive = "ffmpeg-n8.1.3-24-g92611900bb-linux64-gpl-8.1/bin/ffmpeg"
-ffprobe_path_in_archive = "ffmpeg-n8.1.3-24-g92611900bb-linux64-gpl-8.1/bin/ffprobe"
+ffmpeg_path_in_archive = "ffmpeg-n8.1.3-27-g8dca1586f4-linux64-gpl-8.1/bin/ffmpeg"
+ffprobe_path_in_archive = "ffmpeg-n8.1.3-27-g8dca1586f4-linux64-gpl-8.1/bin/ffprobe"
 license = "GPL-3.0-or-later"
-release_tag = "autobuild-2026-10-26-14-25"
-date_pinned = "2026-10-26"
+release_tag = "autobuild-2026-10-31-12-59"
+date_pinned = "2026-11-22"
 
 [ffmpeg.windows-x86_64]
 version = "8.1.3"
-url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-26-14-25/ffmpeg-n8.1.3-24-g92611900bb-win64-gpl-8.1.zip"
-sha256 = "bf01c986f3f9d25ba316146a5ad37369a23f166bbe2ed002c1ec8a9b2f65183e"
+url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59/ffmpeg-n8.1.3-27-g8dca1586f4-win64-gpl-8.1.zip"
+sha256 = "401dffcf14c301082e1fc03b0bc876b92ea676bfc521fc56e80a1537d137034f"
 archive_kind = "zip"
-ffmpeg_path_in_archive = "ffmpeg-n8.1.3-24-g92611900bb-win64-gpl-8.1/bin/ffmpeg.exe"
-ffprobe_path_in_archive = "ffmpeg-n8.1.3-24-g92611900bb-win64-gpl-8.1/bin/ffprobe.exe"
+ffmpeg_path_in_archive = "ffmpeg-n8.1.3-27-g8dca1586f4-win64-gpl-8.1/bin/ffmpeg.exe"
+ffprobe_path_in_archive = "ffmpeg-n8.1.3-27-g8dca1586f4-win64-gpl-8.1/bin/ffprobe.exe"
 license = "GPL-3.0-or-later"
-release_tag = "autobuild-2026-10-26-14-25"
-date_pinned = "2026-10-26"
+release_tag = "autobuild-2026-10-31-12-59"
+date_pinned = "2026-11-22"
 
 [ytdlp.linux-x86_64]
 version = "2026.10.26"
