@@ -220,6 +220,8 @@ pub enum YtdlpErrorKind {
     IpBlocked,
     /// A TikTok photo/slideshow post, which yt-dlp can't download as video.
     TikTokPhoto,
+    /// The post exists but has no video (text-only tweet, photo post, ...).
+    NoVideo,
     Network,
     Unknown,
 }
@@ -262,6 +264,13 @@ pub fn classify_ytdlp_error(stderr: &str) -> YtdlpErrorKind {
         "this video is only available for registered users",
         "members-only",
         "join this channel",
+        // X/Twitter
+        "nsfw tweet requires authentication",
+        "requires authentication",
+        // Instagram ("empty media response ... use --cookies-from-browser")
+        "empty media response",
+        "rate-limit reached or login required",
+        "use --cookies-from-browser or --cookies for the authentication",
     ]) {
         YtdlpErrorKind::LoginRequired
     } else if has(&[
@@ -276,6 +285,12 @@ pub fn classify_ytdlp_error(stderr: &str) -> YtdlpErrorKind {
         "channel does not exist",
     ]) {
         YtdlpErrorKind::Unavailable
+    } else if has(&[
+        "no video could be found in this tweet",
+        "there's no video in this post",
+        "there is no video in this post",
+    ]) {
+        YtdlpErrorKind::NoVideo
     } else if has(&["ip address is blocked", "your ip is blocked"]) {
         YtdlpErrorKind::IpBlocked
     } else if s.contains("unsupported url") && s.contains("tiktok.com/") && s.contains("/photo/") {
@@ -952,6 +967,18 @@ mod tests {
             (
                 "WARNING: [generic] Falling back on generic information extractor\nERROR: Unsupported URL: https://www.tiktok.com/?_r=1",
                 Unavailable,
+            ),
+            (
+                "ERROR: [twitter] 1866581848385323342: No video could be found in this tweet",
+                NoVideo,
+            ),
+            (
+                "ERROR: [twitter] 1: NSFW tweet requires authentication. Use --cookies, --cookies-from-browser, --username and --password, --netrc-cmd, or --netrc (twitter) to provide account credentials",
+                LoginRequired,
+            ),
+            (
+                "ERROR: [Instagram] CWqAgUZgCku: Instagram sent an empty media response. Check if this post is accessible in your browser without being logged-in. If it is not, then use --cookies-from-browser or --cookies for the authentication.",
+                LoginRequired,
             ),
             ("something entirely unexpected", Unknown),
             ("", Unknown),

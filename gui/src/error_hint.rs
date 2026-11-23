@@ -47,7 +47,7 @@ pub fn hint(kind: YtdlpErrorKind, node_found: bool) -> (&'static str, FixAction)
             FixAction::InstallNode,
         ),
         YtdlpErrorKind::LoginRequired => (
-            "This video needs you to be signed in (age-restricted or members-only). Use your browser's cookies.",
+            "This video needs you to be signed in (age-restricted, NSFW, private account or members-only). Use your browser's cookies.",
             FixAction::UseCookies,
         ),
         YtdlpErrorKind::Unavailable => (
@@ -65,6 +65,10 @@ pub fn hint(kind: YtdlpErrorKind, node_found: bool) -> (&'static str, FixAction)
         YtdlpErrorKind::TikTokPhoto => (
             "This is a TikTok photo slideshow, not a video, and yt-dlp can't download those yet. A newer yt-dlp may add support.",
             FixAction::UpdateYtdlp,
+        ),
+        YtdlpErrorKind::NoVideo => (
+            "This post has no video to download (it's text or photos only).",
+            FixAction::Retry,
         ),
         YtdlpErrorKind::Network => (
             "Couldn't reach the site. Check your connection and try again.",
@@ -112,6 +116,7 @@ mod tests {
             UnsupportedUrl,
             IpBlocked,
             TikTokPhoto,
+            NoVideo,
             Network,
             Unknown,
         ] {

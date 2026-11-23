@@ -34,6 +34,7 @@ Built with Rust + [egui](https://github.com/emilk/egui) for the GUI, and drives 
 - Playlist/channel support with per-item checkboxes and select-all/none
 - **Clip from a link**: download just a section (From/To, e.g. `1:30`–`2:00`) with exact cuts
 - **TikTok**: prefers the H.264 stream so files play in Discord/Firefox/Windows, names files `uploader - caption [id]`
+- **X/Twitter and Instagram**: short `title [id]` file names, and plain-English hints when a post needs you signed in (use browser cookies) or has no video
 - Options: embed thumbnail/metadata, subtitles (with auto-subs), SponsorBlock removal, rate limiting, concurrent fragments, custom filename template
 - Login-required content: cookies from a browser profile or a `cookies.txt` file — MediaKit never stores credentials and redacts cookie values from any displayed/copied command
 - **Chaining**: "Download → Discord-size clip", "Download → GIF", "Download → MP3" queue as one entry; the intermediate download is cleaned up automatically once the conversion finishes

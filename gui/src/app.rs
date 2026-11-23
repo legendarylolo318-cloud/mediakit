@@ -1122,11 +1122,13 @@ impl MediaKitApp {
     fn download_options_for(&self, url: &str, format: &FormatSelection) -> DownloadOptions {
         let mut options = self.current_download_options();
         options.section = self.clip_section().ok().flatten();
-        if mediakit_core::sites::is_tiktok_url(url) {
-            options.extra_args =
-                mediakit_core::sites::tiktok_extra_args(self.download_tiktok_h264, format);
+        if let Some(site) = mediakit_core::sites::site_of(url) {
+            if site == mediakit_core::sites::Site::TikTok {
+                options.extra_args =
+                    mediakit_core::sites::tiktok_extra_args(self.download_tiktok_h264, format);
+            }
             options.output_template =
-                mediakit_core::sites::tiktok_output_template(&options.output_template);
+                mediakit_core::sites::site_output_template(site, &options.output_template);
         }
         options
     }

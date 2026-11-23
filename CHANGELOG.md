@@ -4,6 +4,16 @@ All notable changes to MediaKit are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); versions match the
 tags on the [Releases](../../releases) page.
 
+## [0.3.1] - 2026-11-22
+
+### Added
+- **X/Twitter and Instagram polish** (both already downloaded through yt-dlp):
+  files are named `title [post id]` (trimmed), so long tweets don't make huge
+  names and posts from one account don't overwrite each other.
+- Clear messages instead of "update yt-dlp" for posts that need a login (NSFW
+  tweets, private/login-only Instagram posts and reels; offers browser cookies)
+  and for tweets/posts that have no video.
+
 ## [0.3.0] - 2026-11-22
 
 ### Added
